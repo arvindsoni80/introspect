@@ -1,0 +1,7 @@
+# Example sales rep email list
+# Add one email per line
+# Lines starting with # are ignored
+
+john.doe@company.com
+jane.smith@company.com
+bob.jones@company.com
