@@ -36,7 +36,7 @@ Introspect analyzes your Gong sales calls to:
 ### 1. Clone the Repository
 
 ```bash
-git clone <repository-url>
+git clone git@github.com:arvindsoni80/introspect.git
 cd introspect
 ```
 
