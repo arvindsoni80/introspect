@@ -1,9 +1,11 @@
 """Configuration management for the application."""
 
+import os
 from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -30,6 +32,16 @@ class Settings(BaseSettings):
     # Database settings
     db_type: str = "sqlite"  # "sqlite" for local, "firestore" for cloud
     sqlite_db_path: str = "./data/calls.db"
+
+    @field_validator('sqlite_db_path')
+    @classmethod
+    def expand_db_path(cls, v: str) -> str:
+        """Expand ~ and environment variables in database path."""
+        # Expand ~ to home directory
+        expanded = os.path.expanduser(v)
+        # Expand environment variables like $HOME
+        expanded = os.path.expandvars(expanded)
+        return expanded
 
     class Config:
         """Pydantic config."""

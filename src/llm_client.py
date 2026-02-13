@@ -37,19 +37,21 @@ class LLMClient:
         """
         prompt = f"""Analyze this sales call transcript and determine if it is a DISCOVERY CALL.
 
-✅ IT IS A DISCOVERY CALL if it includes:
-1. **Introductions among people** - Getting to know each other, backgrounds, roles
-2. **Introduction to the product** - Explaining what CodeRabbit is, how it works
-3. **Discussion of features and benefits** - What CodeRabbit can do, value propositions
-4. **Discussion of a potential trial** - Exploring pilot programs, getting started
-5. **Lots of questions FROM CodeRabbit** - Asking about customer's needs, current process, team size, tech stack, challenges
-6. **Lots of questions FROM customer** - Asking about CodeRabbit's features, integrations, pricing, security, use cases
+✅ IT IS A DISCOVERY CALL if it includes ANY of these (doesn't need all):
+1. **Product introduction** - Explaining what CodeRabbit is, how it works, demonstrations
+2. **Customer needs exploration** - Asking about their current code review process, challenges, team size, tech stack
+3. **Feature discussions** - Explaining CodeRabbit features, integrations, capabilities
+4. **Qualification questions** - Questions about budget, timeline, decision process, stakeholders
+5. **Two-way engagement** - Both sales rep and customer asking questions and sharing information
+6. **Exploration phase** - Learning about each other, assessing fit, discussing potential trial
+
+Note: A call can be discovery even if it's the 2nd or 3rd conversation, as long as there's meaningful exploration of needs and product fit.
 
 ❌ IT IS NOT A DISCOVERY CALL if:
-1. **No-show** - External participant never joined or didn't speak (only internal CodeRabbit team talking)
-2. **Deal terms discussed** - Pricing negotiations, contract terms, legal discussions
-3. **Trial feedback discussed** - Reviewing results after a trial, discussing what worked/didn't work
-4. **Specific technical challenges** - Deep technical troubleshooting, debugging specific issues (not product introduction)
+1. **No-show** - External participant never joined or barely spoke (only internal team talking)
+2. **Pure negotiation** - Focused only on pricing, contract terms, legal discussions (no product or needs discussion)
+3. **Pure troubleshooting** - Only technical debugging of specific issues (no exploration or qualification)
+4. **Admin/logistics only** - Scheduling, onboarding logistics, account setup without substantive discussion
 
 EXAMPLES:
 
@@ -193,17 +195,20 @@ MEDDPICC Scoring Framework:
 0: Minimal engagement or no champion identified
 
 **Competition (0-5)**
-5: All competitors identified, strengths/weaknesses understood
-4: Main competitors known with some differentiation clarity
-3: Some competitive alternatives mentioned
-1: Vague awareness or minimal mention of alternatives
-0: No competitive discussion
+IMPORTANT: Focus on specific competitor tools for AI code review that the customer is currently using or considering.
+Named tools include: Greptile, BugBot, Copilot, Claude, Graphite, Macroscope, SonarQube, Codacy, GitHub Advanced Security, etc.
+
+5: Specific competitor tools named (e.g., "using Copilot", "evaluating Greptile"), with strengths/weaknesses discussed
+4: Specific competitor tools named with some context about their usage
+3: General mention of competitors or categories (e.g., "looking at AI tools", "comparing with others")
+2: Vague competitive awareness (e.g., "might check alternatives")
+0: No discussion of what customer currently uses or is considering
 
 <transcript>
 {transcript[:15000]}
 </transcript>
 
-Respond with ONLY a valid JSON object (no markdown, no code blocks, no extra text):
+CRITICAL: Respond with valid JSON in a markdown code block. Use this EXACT format with NO trailing commas:
 {{
   "scores": {{
     "metrics": 2,
@@ -230,7 +235,7 @@ Respond with ONLY a valid JSON object (no markdown, no code blocks, no extra tex
 
         response = await self.client.messages.create(
             model=self.model,
-            max_tokens=2048,
+            max_tokens=3500,  # Increased for full response with detailed notes
             temperature=0,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -238,41 +243,87 @@ Respond with ONLY a valid JSON object (no markdown, no code blocks, no extra tex
         # Parse response
         content = response.content[0].text
 
-        try:
-            # Try to extract JSON from markdown code blocks if present
-            if "```json" in content:
-                json_start = content.find("```json") + 7
-                json_end = content.find("```", json_start)
-                content = content[json_start:json_end].strip()
-            elif "```" in content:
-                json_start = content.find("```") + 3
-                json_end = content.find("```", json_start)
-                content = content[json_start:json_end].strip()
+        # Retry logic for JSON parsing
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                # Try to extract JSON from markdown code blocks if present
+                content_to_parse = content
+                if "```json" in content_to_parse:
+                    json_start = content_to_parse.find("```json") + 7
+                    json_end = content_to_parse.find("```", json_start)
+                    content_to_parse = content_to_parse[json_start:json_end].strip()
+                elif "```" in content_to_parse:
+                    json_start = content_to_parse.find("```") + 3
+                    json_end = content_to_parse.find("```", json_start)
+                    content_to_parse = content_to_parse[json_start:json_end].strip()
 
-            result = json.loads(content)
+                # Try to clean up common JSON issues
+                # Remove trailing commas before closing braces/brackets
+                import re
+                content_to_parse = re.sub(r',(\s*[}\]])', r'\1', content_to_parse)
 
-            # Calculate overall score
-            scores_dict = result["scores"]
-            overall = sum(scores_dict.values()) / len(scores_dict)
+                result = json.loads(content_to_parse)
 
-            scores = MEDDPICCScores(
-                metrics=scores_dict["metrics"],
-                economic_buyer=scores_dict["economic_buyer"],
-                decision_criteria=scores_dict["decision_criteria"],
-                decision_process=scores_dict["decision_process"],
-                paper_process=scores_dict["paper_process"],
-                identify_pain=scores_dict["identify_pain"],
-                champion=scores_dict["champion"],
-                competition=scores_dict["competition"],
-                overall_score=round(overall, 1),
-            )
+                # Calculate overall score
+                scores_dict = result["scores"]
+                overall = sum(scores_dict.values()) / len(scores_dict)
 
-            summary = result.get("summary", "No summary provided")
-            notes = AnalysisNotes(**result["notes"])
+                scores = MEDDPICCScores(
+                    metrics=scores_dict["metrics"],
+                    economic_buyer=scores_dict["economic_buyer"],
+                    decision_criteria=scores_dict["decision_criteria"],
+                    decision_process=scores_dict["decision_process"],
+                    paper_process=scores_dict["paper_process"],
+                    identify_pain=scores_dict["identify_pain"],
+                    champion=scores_dict["champion"],
+                    competition=scores_dict["competition"],
+                    overall_score=round(overall, 1),
+                )
 
-            return scores, notes, summary
+                summary = result.get("summary", "No summary provided")
 
-        except (json.JSONDecodeError, KeyError) as e:
-            print(f"\n[DEBUG] Failed to parse MEDDPICC response: {e}")
-            print(f"[DEBUG] Raw response: {content[:500]}")
-            raise ValueError(f"Failed to parse MEDDPICC scores from LLM: {e}")
+                # Validate notes has all required fields
+                notes_data = result.get("notes", {})
+                required_fields = ["metrics", "economic_buyer", "decision_criteria",
+                                  "decision_process", "paper_process", "identify_pain",
+                                  "champion", "competition"]
+                missing_fields = [f for f in required_fields if f not in notes_data]
+
+                if missing_fields and attempt < max_retries - 1:
+                    print(f"\n[WARNING] Missing fields in notes: {missing_fields}, retrying...")
+                    # Will retry in next iteration
+                    continue
+                elif missing_fields:
+                    print(f"\n[WARNING] Missing fields in notes: {missing_fields}, using defaults")
+
+                notes = AnalysisNotes(**notes_data)
+
+                return scores, notes, summary
+
+            except (json.JSONDecodeError, KeyError) as e:
+                if attempt < max_retries - 1:
+                    # Retry with a simpler prompt
+                    print(f"\n[WARNING] JSON parse failed (attempt {attempt + 1}/{max_retries}), retrying...")
+                    print(f"[DEBUG] Error: {e}")
+                    print(f"[DEBUG] Problematic JSON (first 1000 chars):\n{content[:1000]}")
+
+                    # Retry the API call with emphasis on JSON format
+                    response = await self.client.messages.create(
+                        model=self.model,
+                        max_tokens=4000,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": f"{prompt}\n\nIMPORTANT: Return ONLY valid JSON with no trailing commas. Double-check your JSON syntax.\n\nTranscript:\n{transcript[:15000]}",
+                            }
+                        ],
+                    )
+                    content = response.content[0].text
+                    continue
+                else:
+                    # Final attempt failed
+                    print(f"\n[ERROR] Failed to parse MEDDPICC response after {max_retries} attempts")
+                    print(f"[ERROR] Error: {e}")
+                    print(f"[ERROR] Full response:\n{content}")
+                    raise ValueError(f"Failed to parse MEDDPICC scores from LLM after {max_retries} attempts: {e}")

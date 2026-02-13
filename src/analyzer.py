@@ -53,11 +53,19 @@ class CallAnalyzer:
         async with AsyncGongClient(self.settings) as gong_client:
             # Step 1: Fetch calls from Gong (already filtered for external participants)
             log(f"\n📞 Fetching calls with extended metadata (last {self.settings.gong_lookback_days} days)...")
+            log(f"   • Sales reps: {', '.join(sales_rep_emails)}")
+            log(f"   • Internal domain filter: {self.settings.internal_domain}")
+
             # Request more fields to get account/deal information
             calls = await gong_client.get_calls_for_sales_reps(sales_rep_emails, include_all_fields=False)
 
             if not calls:
-                log("   No calls found with external participants")
+                log("   ⚠️  No calls found with external participants")
+                log("   Possible causes:")
+                log("      • No calls in date range (try increasing GONG_LOOKBACK_DAYS)")
+                log("      • Sales rep emails don't match Gong users")
+                log("      • All calls were internal-only (no external participants)")
+                log(f"\n   💡 Debug: Run 'python tests/test_gong.py --sales-reps-file sales_reps.txt' to verify Gong connection")
                 return results
 
             # Group by rep for reporting
@@ -97,12 +105,16 @@ class CallAnalyzer:
             calls_by_rep = {}
             for call in calls:
                 email = call.get("sales_rep_email", "Unknown")
+                # Normalize email: strip whitespace and lowercase
+                email = email.strip().lower() if email != "Unknown" else email
                 if email not in calls_by_rep:
                     calls_by_rep[email] = []
                 calls_by_rep[email].append(call)
 
             # Step 5: Process each rep's calls in alphabetical order
             log(f"\n🤖 Analyzing calls with LLM (processing by rep)...")
+            log(f"   Total unique reps: {len(calls_by_rep)}")
+            log(f"   Reps (sorted): {', '.join(sorted(calls_by_rep.keys()))}")
 
             total_processed = 0
             for rep_email in sorted(calls_by_rep.keys()):
@@ -111,6 +123,7 @@ class CallAnalyzer:
 
                 # Post thread header if Slack client provided
                 if self.slack_client:
+                    log(f"      → Posting thread header for {rep_email}...")
                     await self.slack_client.post_rep_thread_header(rep_email)
 
                 rep_discovery_count = 0
@@ -127,9 +140,12 @@ class CallAnalyzer:
                         continue
 
                     # Check if call already evaluated (skip LLM analysis)
-                    if self.repository and await self.repository.call_exists(call_id):
-                        log(f"      [{i}/{len(rep_calls)}] Skipping {call_id} - already evaluated")
-                        continue
+                    if self.repository:
+                        if await self.repository.call_exists(call_id):
+                            log(f"      [{i}/{len(rep_calls)}] ⏭️  Skipping {call_id} - already evaluated")
+                            continue
+                    else:
+                        log(f"      [{i}/{len(rep_calls)}] ⚠️  No repository - cannot check for duplicates")
 
                     transcript = transcripts[call_id]
 
@@ -137,6 +153,13 @@ class CallAnalyzer:
 
                     # Classify if discovery call
                     is_discovery, reasoning = await self.llm_client.is_discovery_call(transcript)
+
+                    # Store that we've evaluated this call (for deduplication)
+                    if self.repository:
+                        await self.repository.store_evaluated_call(call_id, is_discovery, reasoning)
+
+                    if not is_discovery:
+                        log(f"         → ❌ Not discovery: {reasoning[:80]}...")
 
                     # Extract participants
                     participants = gong_client.extract_participants(call)
@@ -207,10 +230,57 @@ class CallAnalyzer:
             log(f"   • Total external calls: {len(results)}")
             log(f"   • Discovery calls: {discovery_count}")
 
+            # Debug: Check conditions for summary tables
+            log(f"\n🔍 Summary table conditions:")
+            log(f"   • Slack client configured: {self.slack_client is not None}")
+            log(f"   • Discovery count > 0: {discovery_count > 0}")
+            log(f"   • Will post summaries: {self.slack_client and discovery_count > 0}")
+
             # Post summary table at the end
             if self.slack_client and discovery_count > 0:
-                log(f"\n📊 Posting summary table...")
-                await self.slack_client.post_summary_table(results)
+                log(f"\n📊 Posting call summary table (by rep)...")
+                try:
+                    success = await self.slack_client.post_summary_table(results)
+                    if success:
+                        log(f"   ✓ Posted call summary table")
+                    else:
+                        log(f"   ✗ Failed to post call summary table (check Slack permissions)")
+                except Exception as e:
+                    log(f"   ✗ Error posting call summary table: {e}")
+
+                # Post account-level summary if repository available
+                if self.repository:
+                    log(f"\n📊 Posting account summary table (by domain)...")
+
+                    # Collect unique domains from discovery calls
+                    domains = set()
+                    for r in results:
+                        if r.is_discovery_call and r.participants.external:
+                            first_external = r.participants.external[0]
+                            domain = first_external.split("@")[-1] if "@" in first_external else first_external
+                            domains.add(domain)
+
+                    log(f"   → Found {len(domains)} unique domain(s)")
+
+                    # Get account records for these domains
+                    account_records = []
+                    for domain in domains:
+                        account = await self.repository.get_account(domain)
+                        if account:
+                            account_records.append(account)
+                            log(f"      • {domain}: {len(account.calls)} call(s)")
+
+                    if account_records:
+                        try:
+                            success = await self.slack_client.post_account_summary_table(account_records)
+                            if success:
+                                log(f"   ✓ Posted account summary for {len(account_records)} account(s)")
+                            else:
+                                log(f"   ✗ Failed to post account summary (check Slack permissions)")
+                        except Exception as e:
+                            log(f"   ✗ Error posting account summary: {e}")
+                    else:
+                        log(f"   ⚠️  No account records found to post")
 
         return results
 

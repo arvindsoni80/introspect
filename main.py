@@ -107,7 +107,11 @@ async def analyze(settings, emails, post_slack):
     # Run analysis with Slack client - posts as it processes
     analyzer = CallAnalyzer(settings, slack_client=slack_client)
     try:
-        click.echo(f"💾 Database: {settings.db_type} ({settings.sqlite_db_path if settings.db_type == 'sqlite' else 'N/A'})")
+        if analyzer.repository:
+            click.echo(f"💾 Database: {settings.db_type} ({settings.sqlite_db_path if settings.db_type == 'sqlite' else 'N/A'})")
+            click.echo(f"   ✓ Repository initialized - deduplication enabled")
+        else:
+            click.echo(f"⚠️  No repository - calls will not be deduplicated")
         results = await analyzer.analyze_calls(emails, verbose=True)
         return results
     finally:

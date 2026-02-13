@@ -27,6 +27,7 @@ class SQLiteCallRepository(CallRepository):
 
     def _init_db(self):
         """Initialize database schema."""
+        # Account-level MEDDPICC data (discovery calls only)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS accounts (
                 domain TEXT PRIMARY KEY,
@@ -34,6 +35,16 @@ class SQLiteCallRepository(CallRepository):
                 updated_at TEXT NOT NULL,
                 calls TEXT NOT NULL,
                 overall_meddpicc TEXT NOT NULL
+            )
+        """)
+
+        # Track all evaluated calls (deduplication + reasoning)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS evaluated_calls (
+                call_id TEXT PRIMARY KEY,
+                evaluated_at TEXT NOT NULL,
+                is_discovery INTEGER NOT NULL,
+                reason TEXT
             )
         """)
         self.conn.commit()
@@ -140,20 +151,57 @@ class SQLiteCallRepository(CallRepository):
         cursor = self.conn.execute("SELECT domain FROM accounts ORDER BY domain")
         return [row[0] for row in cursor.fetchall()]
 
+    async def get_all_accounts(self) -> list[AccountRecord]:
+        """Get all account records."""
+        cursor = self.conn.execute(
+            "SELECT domain, created_at, updated_at, calls, overall_meddpicc FROM accounts ORDER BY domain"
+        )
+        accounts = []
+        for row in cursor.fetchall():
+            domain, created_at, updated_at, calls_json, overall_json = row
+            accounts.append(
+                AccountRecord(
+                    domain=domain,
+                    created_at=datetime.fromisoformat(created_at),
+                    updated_at=datetime.fromisoformat(updated_at),
+                    calls=[AccountCall(**c) for c in json.loads(calls_json)],
+                    overall_meddpicc=MEDDPICCScores(**json.loads(overall_json)),
+                )
+            )
+        return accounts
+
     async def call_exists(self, call_id: str) -> bool:
         """Check if a call has already been evaluated."""
         cursor = self.conn.execute(
-            "SELECT calls FROM accounts"
+            "SELECT 1 FROM evaluated_calls WHERE call_id = ?",
+            (call_id,)
         )
+        return cursor.fetchone() is not None
 
-        for row in cursor.fetchall():
-            calls_json = row[0]
-            calls = json.loads(calls_json)
-            for call in calls:
-                if call.get("call_id") == call_id:
-                    return True
+    async def store_evaluated_call(
+        self, call_id: str, is_discovery: bool, reason: Optional[str] = None
+    ) -> None:
+        """
+        Store that a call has been evaluated.
 
-        return False
+        Args:
+            call_id: Unique call identifier
+            is_discovery: Whether call was classified as discovery
+            reason: Why it's NOT a discovery call (only if is_discovery=False)
+        """
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO evaluated_calls (call_id, evaluated_at, is_discovery, reason)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                call_id,
+                datetime.now().isoformat(),
+                1 if is_discovery else 0,
+                reason if not is_discovery else None,
+            ),
+        )
+        self.conn.commit()
 
     async def close(self) -> None:
         """Close database connection."""

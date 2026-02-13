@@ -75,6 +75,30 @@ class CallRepository(ABC):
         pass
 
     @abstractmethod
+    async def store_evaluated_call(
+        self, call_id: str, is_discovery: bool, reason: Optional[str] = None
+    ) -> None:
+        """
+        Store that a call has been evaluated.
+
+        Args:
+            call_id: Unique call identifier
+            is_discovery: Whether call was classified as discovery
+            reason: Why it's NOT a discovery call (only stored if is_discovery=False)
+        """
+        pass
+
+    @abstractmethod
+    async def get_all_accounts(self) -> list[AccountRecord]:
+        """
+        Get all account records.
+
+        Returns:
+            List of all AccountRecord objects
+        """
+        pass
+
+    @abstractmethod
     async def close(self) -> None:
         """Close any open connections."""
         pass

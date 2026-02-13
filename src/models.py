@@ -30,14 +30,14 @@ class MEDDPICCScores(BaseModel):
 class AnalysisNotes(BaseModel):
     """Detailed explanations for each MEDDPICC dimension."""
 
-    metrics: str
-    economic_buyer: str
-    decision_criteria: str
-    decision_process: str
-    paper_process: str
-    identify_pain: str
-    champion: str
-    competition: str
+    metrics: str = "Not provided"
+    economic_buyer: str = "Not provided"
+    decision_criteria: str = "Not provided"
+    decision_process: str = "Not provided"
+    paper_process: str = "Not provided"
+    identify_pain: str = "Not provided"
+    champion: str = "Not provided"
+    competition: str = "Not provided"
 
 
 class CallAnalysis(BaseModel):

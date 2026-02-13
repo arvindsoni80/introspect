@@ -188,7 +188,30 @@ python main.py --sales-reps-file sales_reps.txt --post-slack
 - One thread per sales rep
 - Each discovery call posted as it completes
 - Completion summary per rep
-- Overall summary table at the end
+- Overall summary table at the end (only if new discovery calls found)
+
+### Post Summary Tables from Database
+
+Use the standalone script to post summary tables from the database **without running analysis**:
+
+```bash
+# Post both tables (by rep and by domain)
+python post_slack_summary.py
+
+# Post only call summary (by rep)
+python post_slack_summary.py --by-rep
+
+# Post only account summary (by domain)
+python post_slack_summary.py --by-domain
+```
+
+**Features:**
+- ✅ Reads from database (no Gong API calls, no LLM analysis)
+- ✅ Posts **ALL data** in batches of 10 (no truncation)
+- ✅ Tables line up across batches
+- ✅ Fast - completes in seconds
+
+**Use case:** Daily Slack updates showing complete MEDDPICC status, even when no new calls are analyzed.
 
 ## Viewing Results
 
@@ -387,6 +410,7 @@ introspect/
 │   └── test_db.py          # Database test
 │
 ├── main.py                 # CLI entry point
+├── post_slack_summary.py   # Post summaries from database to Slack
 ├── view_db.py              # Database viewer
 ├── view_evolution.py       # Evolution tracker
 │

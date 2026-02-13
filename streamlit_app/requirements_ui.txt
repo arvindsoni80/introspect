@@ -1,0 +1,9 @@
+# Streamlit UI Requirements
+# Install with: pip install -r requirements_ui.txt
+
+streamlit>=1.31.0
+plotly>=5.18.0
+pandas>=2.1.0
+
+# Note: All other dependencies (anthropic, httpx, pydantic, etc.)
+# are already in the main requirements.txt at project root
