@@ -381,13 +381,16 @@ def main():
                 }
                 top_dims = sorted(dim_scores.items(), key=lambda x: x[1], reverse=True)[:3]
                 top_dims_str = " | ".join([
-                    f"{styling.format_dimension_abbrev(dim)}: {score}"
-                    for dim, score in top_dims
+                    f"{styling.format_dimension_abbrev(dim)}: {dim_score}"
+                    for dim, dim_score in top_dims
                 ])
 
-                # Get most recent call link
-                most_recent_call = sorted(account.calls, key=lambda c: c.call_date, reverse=True)[0]
-                gong_url = styling.get_gong_call_link(most_recent_call.call_id)
+                # Get most recent call link (defensive check for empty calls)
+                if account.calls:
+                    most_recent_call = sorted(account.calls, key=lambda c: c.call_date, reverse=True)[0]
+                    gong_url = styling.get_gong_call_link(most_recent_call.call_id)
+                else:
+                    gong_url = ""  # Empty string if no calls (shouldn't happen for top accounts)
 
                 row = {
                     "#": i,

@@ -371,9 +371,12 @@ def main():
             weakest_dim, weakest_score = min(dim_scores.items(), key=lambda x: x[1])
             key_gap = f"{styling.format_dimension_abbrev(weakest_dim)}: {weakest_score}"
 
-            # Get most recent call for Gong link
-            most_recent_call = sorted(account.calls, key=lambda c: c.call_date, reverse=True)[0]
-            gong_url = styling.get_gong_call_link(most_recent_call.call_id)
+            # Get most recent call for Gong link (defensive check for empty calls)
+            if account.calls:
+                most_recent_call = sorted(account.calls, key=lambda c: c.call_date, reverse=True)[0]
+                gong_url = styling.get_gong_call_link(most_recent_call.call_id)
+            else:
+                gong_url = ""  # Empty string if no calls
 
             row = {
                 "#": i,
