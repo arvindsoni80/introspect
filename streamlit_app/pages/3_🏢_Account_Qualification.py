@@ -15,7 +15,7 @@ sys.path.insert(0, str(project_root))
 
 from src.config import load_settings
 from src.sqlite_repository import SQLiteCallRepository
-from streamlit_app.utils import db_queries, metrics, styling, pagination
+from streamlit_app.utils import db_queries, metrics, styling, pagination, sales_rep_queries
 
 # Page config
 st.set_page_config(
@@ -36,7 +36,12 @@ async def load_data(date_from=None, date_to=None):
             date_from=date_from,
             date_to=date_to
         )
-        return accounts
+
+        # Load sales rep data
+        sales_reps = await sales_rep_queries.get_all_sales_reps(repo)
+        segments = await sales_rep_queries.get_segments(repo)
+
+        return accounts, sales_reps, segments
     finally:
         await repo.close()
 
@@ -270,11 +275,34 @@ def main():
 
     # Load data
     with st.spinner("Loading accounts..."):
-        accounts = asyncio.run(load_data(date_from, date_to))
+        accounts, sales_reps, segments = asyncio.run(load_data(date_from, date_to))
 
     if not accounts:
         st.warning("No accounts found for the selected date range.")
         return
+
+    # Build rep segment map
+    rep_segment_map = sales_rep_queries.get_rep_segment_map(sales_reps)
+
+    # Segment filter in sidebar
+    segment_options = ["All Segments"] + segments
+    selected_segment = st.sidebar.selectbox(
+        "Sales Segment",
+        options=segment_options,
+        index=0
+    )
+
+    # Filter by segment if selected
+    if selected_segment != "All Segments":
+        accounts = sales_rep_queries.filter_accounts_by_segment(
+            accounts, selected_segment, rep_segment_map
+        )
+        if not accounts:
+            st.warning(f"No accounts found for {selected_segment} segment.")
+            return
+        st.info(f"📊 Viewing: **{selected_segment}** Segment")
+
+    st.sidebar.markdown("---")
 
     # Get categorized accounts
     red_flags = db_queries.get_account_red_flags(accounts, min_calls=3, max_score=3.0)
@@ -371,6 +399,17 @@ def main():
             weakest_dim, weakest_score = min(dim_scores.items(), key=lambda x: x[1])
             key_gap = f"{styling.format_dimension_abbrev(weakest_dim)}: {weakest_score}"
 
+            # Determine primary segment (segment with most calls for this account)
+            segment_counts = {}
+            for call in account.calls:
+                seg = rep_segment_map.get(call.sales_rep, "Unknown")
+                segment_counts[seg] = segment_counts.get(seg, 0) + 1
+
+            if segment_counts:
+                primary_segment = max(segment_counts.items(), key=lambda x: x[1])[0]
+            else:
+                primary_segment = "Unknown"
+
             # Get most recent call for Gong link (defensive check for empty calls)
             if account.calls:
                 most_recent_call = sorted(account.calls, key=lambda c: c.call_date, reverse=True)[0]
@@ -383,6 +422,7 @@ def main():
                 "Account": account.domain,
                 "Score": f"{score:.1f}",
                 "Status": status,
+                "Segment": primary_segment,
                 "# Calls": len(account.calls),
                 "Key Gap": key_gap,
                 "Last Call": styling.format_date(account.updated_at),
