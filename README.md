@@ -54,11 +54,17 @@ source venv/bin/activate
 venv\Scripts\activate
 ```
 
-### 3. Install Dependencies
+### 3. Install Introspect CLI
 
 ```bash
-pip install -r requirements.txt
+# Install in editable mode (recommended for development)
+pip install --editable .
+
+# Or install normally
+pip install .
 ```
+
+This installs the `introspect` command globally in your environment.
 
 ### 4. Configure Environment Variables
 
@@ -154,17 +160,52 @@ python tests/test_db.py
 
 ## Usage
 
-### Basic Usage
+### Quick Start
 
-Analyze calls for specific sales reps:
+View available commands:
 
 ```bash
-python main.py --sales-reps john.doe@company.com jane.smith@company.com
+introspect --help
 ```
 
-### Using a File with Multiple Sales Reps
+**Available commands:**
+- `introspect analyze` - Analyze Gong calls and score on MEDDPICC
+- `introspect post` - Post summaries to Slack from database
+- `introspect ui` - Launch the interactive coaching dashboard
 
-Create a file `sales_reps.txt`:
+### Analyze Command
+
+Analyze Gong call transcripts and score them on MEDDPICC dimensions.
+
+#### Basic Analysis (uses sales_reps.txt by default)
+
+```bash
+introspect analyze
+```
+
+#### Analyze Specific Sales Reps
+
+```bash
+# Single rep
+introspect analyze -r john.doe@company.com
+
+# Multiple reps
+introspect analyze -r john.doe@company.com -r jane.smith@company.com
+```
+
+#### Custom Lookback Window
+
+```bash
+# Analyze last 30 days instead of default 7 days
+introspect analyze -t 30
+
+# Analyze last 90 days
+introspect analyze --days 90
+```
+
+#### Using a File with Multiple Sales Reps
+
+Create `sales_reps.txt`:
 ```
 john.doe@company.com
 jane.smith@company.com
@@ -173,15 +214,21 @@ bob.jones@company.com
 
 Run:
 ```bash
-python main.py --sales-reps-file sales_reps.txt
+introspect analyze --reps-file sales_reps.txt
 ```
 
-### With Slack Posting
+#### With Slack Posting
 
-Post results to Slack in real-time:
+Post results to Slack in real-time as analysis completes:
 
 ```bash
-python main.py --sales-reps-file sales_reps.txt --post-slack
+introspect analyze -p
+
+# Or with explicit flag name
+introspect analyze --post-slack
+
+# Combine with other options
+introspect analyze -t 30 --reps-file sales_reps.txt -p
 ```
 
 **Slack output:**
@@ -190,19 +237,43 @@ python main.py --sales-reps-file sales_reps.txt --post-slack
 - Completion summary per rep
 - Overall summary table at the end (only if new discovery calls found)
 
-### Post Summary Tables from Database
-
-Use the standalone script to post summary tables from the database **without running analysis**:
+#### Complete Example
 
 ```bash
-# Post both tables (by rep and by domain)
-python post_slack_summary.py
+# Analyze last 30 days for all reps in file, post to Slack
+introspect analyze -t 30 --reps-file sales_reps.txt -p
+```
 
-# Post only call summary (by rep)
-python post_slack_summary.py --by-rep
+### Post Command
 
-# Post only account summary (by domain)
-python post_slack_summary.py --by-domain
+Post MEDDPICC summary tables to Slack from database **without running analysis**.
+
+#### Post Both Summaries (default)
+
+```bash
+introspect post
+```
+
+#### Post Only Account Summaries
+
+```bash
+introspect post -a
+# or
+introspect post --accounts
+```
+
+#### Post Only Rep Summaries
+
+```bash
+introspect post -r
+# or
+introspect post --reps
+```
+
+#### Post Both Explicitly
+
+```bash
+introspect post -a -r
 ```
 
 **Features:**
@@ -420,18 +491,42 @@ introspect/
 └── README.md               # This file
 ```
 
+### UI Command
+
+Launch the interactive Streamlit coaching dashboard:
+
+```bash
+# Launch on default port (8501)
+introspect ui
+
+# Launch on custom port
+introspect ui --port 8080
+
+# Make accessible on network
+introspect ui --host 0.0.0.0 --port 8080
+```
+
+Access at http://localhost:8501 (or your custom port)
+
+**Dashboard Features:**
+- 🎓 **Team Coaching** - Team-wide insights, heatmaps, coaching priorities
+- 👤 **Rep Coaching** - Individual performance, focus areas, progress tracking
+- 🏢 **Account Qualification** - Browse accounts, red flags, deal health
+
+Press Ctrl+C to stop the server.
+
 ## Advanced Usage
 
 ### Custom Lookback Period
 
-Analyze calls from the last 30 days:
+Use the `-t` or `--days` flag to override the default 7-day lookback:
 
 ```bash
-# Edit .env
-GONG_LOOKBACK_DAYS=30
+# Analyze last 30 days
+introspect analyze -t 30
 
-# Run analyzer
-python main.py --sales-reps-file sales_reps.txt
+# Analyze last 90 days
+introspect analyze --days 90
 ```
 
 ### Query Database
@@ -467,7 +562,7 @@ sqlite3 -header -csv ./data/calls.db \
 ### 1. Run Daily
 ```bash
 # Safe to run daily - skips already-analyzed calls
-python main.py --sales-reps-file sales_reps.txt --post-slack
+introspect analyze -p
 ```
 
 ### 2. Review Evolution Weekly

@@ -5,6 +5,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -305,211 +306,125 @@ def main():
 
     st.markdown("---")
 
-    # Filter buttons
-    view_mode = st.radio(
-        "View",
-        options=["🔴 Red Flags", "🟢 Strong", "🟡 Moderate", "📋 All"],
-        horizontal=True
-    )
+    # Categorize accounts for status
+    red_flag_domains = {a.domain for a in red_flags}
+    strong_domains = {a.domain for a in strong_accounts}
+    moderate_domains = {a.domain for a in moderate_accounts}
+
+    # Filter options
+    st.markdown("### 📊 All Accounts")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        filter_option = st.selectbox(
+            "Filter by Status",
+            options=["All Accounts", "🔴 Red Flags", "🟢 Strong (≥4.0)", "🟡 Moderate (2.5-4.0)"],
+            index=0
+        )
+    with col2:
+        sort_option = st.selectbox(
+            "Sort by",
+            options=["Score (High to Low)", "Score (Low to High)", "Most Calls", "Account Name"],
+            index=0
+        )
+
+    # Filter accounts based on selection
+    if filter_option == "🔴 Red Flags":
+        filtered_accounts = red_flags
+    elif filter_option == "🟢 Strong (≥4.0)":
+        filtered_accounts = strong_accounts
+    elif filter_option == "🟡 Moderate (2.5-4.0)":
+        filtered_accounts = moderate_accounts
+    else:
+        filtered_accounts = accounts
+
+    # Sort accounts
+    if sort_option == "Score (High to Low)":
+        filtered_accounts = sorted(filtered_accounts, key=lambda a: a.overall_meddpicc.overall_score, reverse=True)
+    elif sort_option == "Score (Low to High)":
+        filtered_accounts = sorted(filtered_accounts, key=lambda a: a.overall_meddpicc.overall_score)
+    elif sort_option == "Most Calls":
+        filtered_accounts = sorted(filtered_accounts, key=lambda a: len(a.calls), reverse=True)
+    else:  # Account Name
+        filtered_accounts = sorted(filtered_accounts, key=lambda a: a.domain)
 
     st.markdown("---")
 
-    # Show accounts based on view mode
-    if view_mode == "🔴 Red Flags":
-        st.subheader("🔴 Red Flags - Need Attention")
-        st.markdown(f"**{len(red_flags)} accounts** with weak qualification after multiple calls")
+    # Build table data
+    if filtered_accounts:
+        table_data = []
+        for i, account in enumerate(filtered_accounts, 1):
+            score = account.overall_meddpicc.overall_score
 
-        if not red_flags:
-            st.info("No red flag accounts found!")
-        else:
-            # Pagination
-            page_accounts, total_pages, current_page = pagination.paginate(
-                red_flags,
-                items_per_page=10,
-                key_prefix="red_flags"
-            )
+            # Determine status
+            if account.domain in red_flag_domains:
+                status = "🔴 Red Flag"
+            elif account.domain in strong_domains:
+                status = "🟢 Strong"
+            elif account.domain in moderate_domains:
+                status = "🟡 Moderate"
+            else:
+                status = "⚪ Other"
 
-            st.markdown(f"Showing {len(page_accounts)} of {len(red_flags)} accounts")
-            pagination.show_pagination_controls(total_pages, current_page, key_prefix="red_flags")
+            # Find weakest dimension
+            dim_scores = {dim: getattr(account.overall_meddpicc, dim) for dim in styling.MEDDPICC_DIMENSIONS}
+            weakest_dim, weakest_score = min(dim_scores.items(), key=lambda x: x[1])
+            key_gap = f"{styling.format_dimension_abbrev(weakest_dim)}: {weakest_score}"
 
-            st.markdown("---")
+            # Get most recent call for Gong link (defensive check for empty calls)
+            if account.calls:
+                most_recent_call = sorted(account.calls, key=lambda c: c.call_date, reverse=True)[0]
+                gong_url = styling.get_gong_call_link(most_recent_call.call_id)
+            else:
+                gong_url = ""  # Empty string if no calls
 
-            for account in page_accounts:
-                score = account.overall_meddpicc.overall_score
-                emoji = styling.get_score_emoji(score)
-                flags = metrics.detect_account_red_flags(account)
+            row = {
+                "#": i,
+                "Account": account.domain,
+                "Score": f"{score:.1f}",
+                "Status": status,
+                "# Calls": len(account.calls),
+                "Key Gap": key_gap,
+                "Last Call": styling.format_date(account.updated_at),
+                "Gong Link": gong_url,
+                "_domain": account.domain  # Hidden column for click handling
+            }
+            table_data.append(row)
 
-                with st.expander(
-                    f"{emoji} **{account.domain}** - Score: {styling.format_score(score)} "
-                    f"({len(account.calls)} calls)",
-                    expanded=False
-                ):
-                    if flags:
-                        st.markdown("**⚠️ Issues:**")
-                        for flag in flags:
-                            st.markdown(f"- {flag}")
+        # Convert to DataFrame
+        df = pd.DataFrame(table_data)
 
-                    st.markdown("---")
-
-                    # Quick stats
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Calls", len(account.calls))
-                    with col2:
-                        st.metric("Score", styling.format_score(score))
-                    with col3:
-                        st.metric("Last Call", styling.format_date(account.updated_at))
-
-                    # Show button to see full details
-                    if st.button(f"View Full Details", key=f"details_{account.domain}"):
-                        st.session_state[f'show_detail_{account.domain}'] = True
-
-                    if st.session_state.get(f'show_detail_{account.domain}', False):
-                        show_account_detail(account)
-
-    elif view_mode == "🟢 Strong":
-        st.subheader("🟢 Strong Qualification - Keep Pushing")
-        st.markdown(f"**{len(strong_accounts)} accounts** with score ≥ 4.0")
-
-        if not strong_accounts:
-            st.info("No strong accounts found yet. Focus on improving discovery!")
-        else:
-            # Pagination
-            page_accounts, total_pages, current_page = pagination.paginate(
-                strong_accounts,
-                items_per_page=10,
-                key_prefix="strong"
-            )
-
-            st.markdown(f"Showing {len(page_accounts)} of {len(strong_accounts)} accounts")
-            pagination.show_pagination_controls(total_pages, current_page, key_prefix="strong")
-
-            st.markdown("---")
-
-            for account in page_accounts:
-                score = account.overall_meddpicc.overall_score
-                emoji = styling.get_score_emoji(score)
-
-                with st.expander(
-                    f"{emoji} **{account.domain}** - Score: {styling.format_score(score)} "
-                    f"({len(account.calls)} calls)"
-                ):
-                    # Quick stats
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Calls", len(account.calls))
-                    with col2:
-                        st.metric("Score", styling.format_score(score))
-                    with col3:
-                        st.metric("Last Call", styling.format_date(account.updated_at))
-
-                    # Strengths
-                    st.markdown("**✅ Strengths:**")
-                    for dim in styling.MEDDPICC_DIMENSIONS:
-                        dim_score = getattr(account.overall_meddpicc, dim)
-                        if dim_score >= 4:
-                            dim_name = styling.format_dimension_name(dim)
-                            st.markdown(f"- {dim_name}: {dim_score}/5")
-
-                    # Show button to see full details
-                    if st.button(f"View Full Details", key=f"details_{account.domain}"):
-                        st.session_state[f'show_detail_{account.domain}'] = True
-
-                    if st.session_state.get(f'show_detail_{account.domain}', False):
-                        show_account_detail(account)
-
-    elif view_mode == "🟡 Moderate":
-        st.subheader("🟡 Moderate - Needs More Discovery")
-        st.markdown(f"**{len(moderate_accounts)} accounts** with score 2.5-4.0")
-
-        if not moderate_accounts:
-            st.info("No moderate accounts found.")
-        else:
-            # Pagination
-            page_accounts, total_pages, current_page = pagination.paginate(
-                moderate_accounts,
-                items_per_page=10,
-                key_prefix="moderate"
-            )
-
-            st.markdown(f"Showing {len(page_accounts)} of {len(moderate_accounts)} accounts")
-            pagination.show_pagination_controls(total_pages, current_page, key_prefix="moderate")
-
-            st.markdown("---")
-
-            for account in page_accounts:
-                score = account.overall_meddpicc.overall_score
-                emoji = styling.get_score_emoji(score)
-
-                with st.expander(
-                    f"{emoji} **{account.domain}** - Score: {styling.format_score(score)} "
-                    f"({len(account.calls)} calls)"
-                ):
-                    # Quick stats
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Calls", len(account.calls))
-                    with col2:
-                        st.metric("Score", styling.format_score(score))
-                    with col3:
-                        st.metric("Last Call", styling.format_date(account.updated_at))
-
-                    # Gaps
-                    gaps = metrics.get_dimension_gaps(account, threshold=4.0)
-                    if gaps:
-                        st.markdown("**Focus on:**")
-                        for dim_key, dim_score, dim_name in gaps[:3]:
-                            st.markdown(f"- {dim_name}: {dim_score}/5")
-
-                    # Show button to see full details
-                    if st.button(f"View Full Details", key=f"details_{account.domain}"):
-                        st.session_state[f'show_detail_{account.domain}'] = True
-
-                    if st.session_state.get(f'show_detail_{account.domain}', False):
-                        show_account_detail(account)
-
-    else:  # All accounts
-        st.subheader("📋 All Accounts")
-
-        # Sort by score
-        sorted_accounts = sorted(accounts, key=lambda a: a.overall_meddpicc.overall_score, reverse=True)
-
-        # Pagination
-        page_accounts, total_pages, current_page = pagination.paginate(
-            sorted_accounts,
-            items_per_page=10,
-            key_prefix="all"
+        # Display table
+        st.dataframe(
+            df.drop(columns=['_domain']),
+            column_config={
+                "Gong Link": st.column_config.LinkColumn("Gong Link", display_text="🔗 View"),
+                "Score": st.column_config.NumberColumn("Score", format="%.1f"),
+            },
+            hide_index=True,
+            use_container_width=True
         )
 
-        st.markdown(f"Showing {len(page_accounts)} of {len(sorted_accounts)} accounts")
-        pagination.show_pagination_controls(total_pages, current_page, key_prefix="all")
+        st.markdown(f"**Showing {len(filtered_accounts)} account(s)**")
 
+        # Account selector for details
         st.markdown("---")
+        st.markdown("### 🔍 View Account Details")
 
-        for account in page_accounts:
-            score = account.overall_meddpicc.overall_score
-            emoji = styling.get_score_emoji(score)
+        selected_account_name = st.selectbox(
+            "Select an account to view details",
+            options=[""] + [a.domain for a in filtered_accounts],
+            format_func=lambda x: "Choose an account..." if x == "" else x
+        )
 
-            with st.expander(
-                f"{emoji} **{account.domain}** - Score: {styling.format_score(score)} "
-                f"({len(account.calls)} calls)"
-            ):
-                # Quick stats
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Calls", len(account.calls))
-                with col2:
-                    st.metric("Score", styling.format_score(score))
-                with col3:
-                    st.metric("Last Call", styling.format_date(account.updated_at))
+        if selected_account_name:
+            # Find the selected account
+            selected_account = next((a for a in filtered_accounts if a.domain == selected_account_name), None)
 
-                # Show button to see full details
-                if st.button(f"View Full Details", key=f"details_{account.domain}"):
-                    st.session_state[f'show_detail_{account.domain}'] = True
-
-                if st.session_state.get(f'show_detail_{account.domain}', False):
-                    show_account_detail(account)
-
-
+            if selected_account:
+                st.markdown("---")
+                show_account_detail(selected_account)
+    else:
+        st.info("No accounts found matching the selected filter.")
 if __name__ == "__main__":
     main()

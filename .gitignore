@@ -211,3 +211,4 @@ data/*
 */data/*              # Database files
 results/*.json        # Old output files (v1.0 - no longer used)
 sales_reps.txt
+sales_rep_data.csv
