@@ -295,6 +295,66 @@ def get_worst_example_call(
         return min(calls, key=lambda c: c.meddpicc_scores.overall_score)
 
 
+def get_top_calls_in_weak_areas(
+    calls: List[AccountCall],
+    weak_dimensions: List[str],
+    top_n: int = 10
+) -> List[AccountCall]:
+    """
+    Get top calls that performed well in the team's weak dimensions.
+
+    Args:
+        calls: List of all calls
+        weak_dimensions: List of dimension keys where team is weak
+        top_n: Number of calls to return
+
+    Returns:
+        List of top calls sorted by their average score in weak dimensions
+    """
+    if not calls or not weak_dimensions:
+        return []
+
+    # Calculate average score in weak dimensions for each call
+    call_scores = []
+    for call in calls:
+        weak_scores = [getattr(call.meddpicc_scores, dim) for dim in weak_dimensions]
+        avg_weak_score = sum(weak_scores) / len(weak_scores) if weak_scores else 0
+        call_scores.append((call, avg_weak_score))
+
+    # Sort by average score in weak dimensions (descending)
+    call_scores.sort(key=lambda x: x[1], reverse=True)
+
+    # Return top N calls
+    return [call for call, score in call_scores[:top_n]]
+
+
+def get_top_accounts_by_discovery(
+    accounts: List[AccountRecord],
+    top_n: int = 10
+) -> List[AccountRecord]:
+    """
+    Get top accounts with the best overall MEDDPICC discovery.
+
+    Args:
+        accounts: List of all accounts
+        top_n: Number of accounts to return
+
+    Returns:
+        List of top accounts sorted by overall MEDDPICC score
+    """
+    if not accounts:
+        return []
+
+    # Sort by overall score (descending)
+    sorted_accounts = sorted(
+        accounts,
+        key=lambda a: a.overall_meddpicc.overall_score,
+        reverse=True
+    )
+
+    return sorted_accounts[:top_n]
+
+
 def generate_next_steps(account: AccountRecord) -> List[str]:
     """
     Generate recommended next steps for an account.

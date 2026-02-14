@@ -300,43 +300,120 @@ def main():
 
     st.markdown("---")
 
-    # Example Calls for Training
-    st.subheader("💡 Example Calls for Training")
+    # Training Examples
+    st.subheader("💡 Training Examples - Learn from Success")
 
     all_calls = []
     for account in accounts:
         all_calls.extend(account.calls)
 
     if all_calls:
-        col1, col2 = st.columns(2)
+        # Get top 3 weakest dimensions
+        weak_dimensions = [p['dimension'] for p in priorities[:3]]
+        weak_dim_names = [p['dimension_name'] for p in priorities[:3]]
 
-        with col1:
-            st.markdown("### 🟢 Best Overall Call")
-            best_call = metrics.get_best_example_call(all_calls)
-            if best_call:
-                st.metric(
-                    label="Score",
-                    value=styling.format_score(best_call.meddpicc_scores.overall_score)
-                )
-                st.markdown(f"**Rep:** {best_call.sales_rep}")
-                st.markdown(f"**Date:** {styling.format_date(best_call.call_date)}")
-                st.markdown(styling.format_gong_link_markdown(best_call.call_id))
-                if best_call.meddpicc_summary:
-                    st.markdown(f"**Summary:** {best_call.meddpicc_summary[:200]}...")
+        # Top 10 Calls in Weak Areas
+        st.markdown("### 📞 Top 10 Calls Excelling in Our Weak Areas")
+        st.markdown(f"Calls that performed well in: **{', '.join(weak_dim_names)}**")
 
-        with col2:
-            st.markdown("### 🔴 Needs Improvement")
-            worst_call = metrics.get_worst_example_call(all_calls)
-            if worst_call:
-                st.metric(
-                    label="Score",
-                    value=styling.format_score(worst_call.meddpicc_scores.overall_score)
-                )
-                st.markdown(f"**Rep:** {worst_call.sales_rep}")
-                st.markdown(f"**Date:** {styling.format_date(worst_call.call_date)}")
-                st.markdown(styling.format_gong_link_markdown(worst_call.call_id))
-                if worst_call.meddpicc_summary:
-                    st.markdown(f"**Summary:** {worst_call.meddpicc_summary[:200]}...")
+        top_calls = metrics.get_top_calls_in_weak_areas(all_calls, weak_dimensions, top_n=10)
+
+        if top_calls:
+            # Build table data
+            table_data = []
+            for i, call in enumerate(top_calls, 1):
+                # Calculate average score in weak dimensions
+                weak_scores = [getattr(call.meddpicc_scores, dim) for dim in weak_dimensions]
+                avg_weak_score = sum(weak_scores) / len(weak_scores)
+
+                # Get individual weak dimension scores
+                weak_scores_str = " | ".join([
+                    f"{styling.format_dimension_abbrev(dim)}: {getattr(call.meddpicc_scores, dim)}"
+                    for dim in weak_dimensions
+                ])
+
+                gong_url = styling.get_gong_call_link(call.call_id)
+
+                row = {
+                    "#": i,
+                    "Date": styling.format_date(call.call_date),
+                    "Sales Rep": call.sales_rep.split('@')[0],
+                    "Weak Area Avg": f"{avg_weak_score:.1f}",
+                    "Overall": f"{call.meddpicc_scores.overall_score:.1f}",
+                    "Weak Scores": weak_scores_str,
+                    "Gong Link": gong_url
+                }
+                table_data.append(row)
+
+            # Convert to DataFrame
+            df = pd.DataFrame(table_data)
+
+            # Display with clickable links
+            st.dataframe(
+                df,
+                column_config={
+                    "Gong Link": st.column_config.LinkColumn("Gong Link", display_text="🔗 Review")
+                },
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.info("No example calls found")
+
+        st.markdown("---")
+
+        # Top 10 Accounts with Best Discovery
+        st.markdown("### 🏢 Top 10 Accounts with Best Overall Discovery")
+        st.markdown("Accounts demonstrating excellent multi-call discovery execution")
+
+        top_accounts = metrics.get_top_accounts_by_discovery(accounts, top_n=10)
+
+        if top_accounts:
+            # Build table data
+            table_data = []
+            for i, account in enumerate(top_accounts, 1):
+                score = account.overall_meddpicc.overall_score
+
+                # Get top 3 MEDDPICC scores for this account
+                dim_scores = {
+                    dim: getattr(account.overall_meddpicc, dim)
+                    for dim in styling.MEDDPICC_DIMENSIONS
+                }
+                top_dims = sorted(dim_scores.items(), key=lambda x: x[1], reverse=True)[:3]
+                top_dims_str = " | ".join([
+                    f"{styling.format_dimension_abbrev(dim)}: {score}"
+                    for dim, score in top_dims
+                ])
+
+                # Get most recent call link
+                most_recent_call = sorted(account.calls, key=lambda c: c.call_date, reverse=True)[0]
+                gong_url = styling.get_gong_call_link(most_recent_call.call_id)
+
+                row = {
+                    "#": i,
+                    "Account": account.domain,
+                    "Score": f"{score:.1f}",
+                    "# Calls": len(account.calls),
+                    "Top 3 Dimensions": top_dims_str,
+                    "Most Recent Call": styling.format_date(most_recent_call.call_date),
+                    "Gong Link": gong_url
+                }
+                table_data.append(row)
+
+            # Convert to DataFrame
+            df = pd.DataFrame(table_data)
+
+            # Display with clickable links
+            st.dataframe(
+                df,
+                column_config={
+                    "Gong Link": st.column_config.LinkColumn("Gong Link", display_text="🔗 Review")
+                },
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.info("No accounts found")
 
 
 if __name__ == "__main__":

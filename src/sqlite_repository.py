@@ -47,6 +47,17 @@ class SQLiteCallRepository(CallRepository):
                 reason TEXT
             )
         """)
+
+        # Sales rep attributes
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS sales_reps (
+                email TEXT PRIMARY KEY,
+                segment TEXT NOT NULL,
+                joining_date TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
         self.conn.commit()
 
     async def get_account(self, domain: str) -> Optional[AccountRecord]:

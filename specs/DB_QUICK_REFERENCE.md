@@ -7,7 +7,8 @@
 ## Database Statistics (as of 2026-02-12)
 - **503 evaluated calls** (discovery + non-discovery)
 - **223 accounts** (domains with at least one discovery call)
-- **Two tables**: `accounts` (discovery calls with MEDDPICC), `evaluated_calls` (all calls for deduplication)
+- **24 sales reps** with segment and tenure data
+- **Three tables**: `accounts` (discovery calls with MEDDPICC), `evaluated_calls` (all calls for deduplication), `sales_reps` (rep attributes)
 
 ## View Database Contents
 
@@ -120,6 +121,30 @@ Tracks all analyzed calls for deduplication. Prevents re-analyzing the same call
 - **Deduplication**: Skip already-analyzed calls (saves LLM costs)
 - **Rejection tracking**: Understand why calls aren't discovery calls
 - **Analytics**: Track discovery call rate and rejection patterns
+
+### `sales_reps` Table (Sales Rep Attributes)
+Stores attributes for each sales rep (segment, joining date, etc.).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `email` | TEXT (PK) | Sales rep email address (e.g., "john@company.com") |
+| `segment` | TEXT | Sales segment (e.g., "enterprise", "velocity", "startup", "mid-enterprise") |
+| `joining_date` | TEXT | ISO 8601 date when rep joined (e.g., "2025-06-16") |
+| `created_at` | TEXT | ISO 8601 timestamp when record was created |
+| `updated_at` | TEXT | ISO 8601 timestamp when record was last updated |
+
+**Purpose:**
+- **Segmentation**: Filter and compare reps by segment (enterprise, velocity, etc.)
+- **Tenure analysis**: Track performance by how long reps have been at the company
+- **Cohort analysis**: Compare new hires vs experienced reps
+- **Coaching prioritization**: Focus on newer reps who need more guidance
+
+**Loading Data:**
+```bash
+python load_sales_reps.py
+```
+
+Loads sales rep data from `sales_rep_data.csv` (format: `email, segment, joining_date`)
 
 ## Common Queries
 
@@ -347,6 +372,53 @@ for row in cursor.fetchall():
     print(f"{domain}: {len(calls)} calls, score: {overall['overall_score']}")
 
 conn.close()
+```
+
+### Sales Reps Table Queries
+
+#### List all sales reps by segment
+```sql
+SELECT
+    email,
+    segment,
+    joining_date,
+    julianday('now') - julianday(joining_date) as days_tenure
+FROM sales_reps
+ORDER BY segment, joining_date;
+```
+
+#### Count reps by segment
+```sql
+SELECT
+    segment,
+    COUNT(*) as rep_count
+FROM sales_reps
+GROUP BY segment
+ORDER BY rep_count DESC;
+```
+
+#### Find newest reps (joined in last 90 days)
+```sql
+SELECT
+    email,
+    segment,
+    joining_date,
+    julianday('now') - julianday(joining_date) as days_tenure
+FROM sales_reps
+WHERE julianday('now') - julianday(joining_date) <= 90
+ORDER BY joining_date DESC;
+```
+
+#### Get rep info for a specific email
+```sql
+SELECT * FROM sales_reps WHERE email = 'john@company.com';
+```
+
+#### Join with call data to analyze performance by segment
+```sql
+-- This requires parsing JSON from accounts table
+-- Example: Get average scores by segment for discovery calls
+-- (Would need to extract sales_rep from calls JSON and join)
 ```
 
 ## Example Account Record
