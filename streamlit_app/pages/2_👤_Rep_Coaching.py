@@ -15,7 +15,7 @@ sys.path.insert(0, str(project_root))
 
 from src.config import load_settings
 from src.sqlite_repository import SQLiteCallRepository
-from streamlit_app.utils import db_queries, metrics, styling, pagination
+from streamlit_app.utils import db_queries, metrics, styling, pagination, sales_rep_queries
 
 # Page config
 st.set_page_config(
@@ -36,7 +36,11 @@ async def load_data(date_from=None, date_to=None):
             date_from=date_from,
             date_to=date_to
         )
-        return accounts
+
+        # Load sales rep data
+        sales_reps = await sales_rep_queries.get_all_sales_reps(repo)
+
+        return accounts, sales_reps
     finally:
         await repo.close()
 
@@ -163,28 +167,60 @@ def main():
 
     # Load data
     with st.spinner("Loading data..."):
-        accounts = asyncio.run(load_data(date_from, date_to))
+        accounts, sales_reps = asyncio.run(load_data(date_from, date_to))
 
     if not accounts:
         st.warning("No discovery calls found for the selected date range.")
         return
 
-    # Get all reps
+    # Build rep segment map
+    rep_segment_map = sales_rep_queries.get_rep_segment_map(sales_reps)
+    rep_details_map = {rep['email']: rep for rep in sales_reps}
+
+    # Get unique segments from sales_reps
+    segments = sorted(set(rep['segment'] for rep in sales_reps))
+
+    # Segment filter
+    segment_options = ["All Segments"] + segments
+    selected_segment_filter = st.sidebar.selectbox(
+        "Filter by Segment",
+        options=segment_options,
+        index=0
+    )
+
+    # Get all reps from accounts
     all_reps = db_queries.get_all_reps(accounts)
 
     if not all_reps:
         st.warning("No sales reps found.")
         return
 
-    # Rep selector
+    # Filter reps by segment if selected
+    if selected_segment_filter != "All Segments":
+        filtered_reps = [
+            rep for rep in all_reps
+            if rep_segment_map.get(rep) == selected_segment_filter
+        ]
+    else:
+        filtered_reps = all_reps
+
+    if not filtered_reps:
+        st.warning(f"No reps found in {selected_segment_filter} segment.")
+        return
+
+    # Show filtered rep count
+    if selected_segment_filter != "All Segments":
+        st.sidebar.caption(f"📊 {len(filtered_reps)} reps in {selected_segment_filter}")
+
+    # Rep selector (filtered by segment)
     selected_rep = st.sidebar.selectbox(
         "Select Sales Rep",
-        options=all_reps,
+        options=filtered_reps,
         format_func=lambda x: x.split('@')[0]  # Show just username
     )
 
-    st.sidebar.markdown("---")
-    st.sidebar.info(f"Analyzing {len(all_reps)} reps across {len(accounts)} accounts")
+    # Get selected rep's details
+    rep_details = rep_details_map.get(selected_rep)
 
     # Get data for selected rep
     rep_calls = db_queries.get_calls_by_rep(accounts, selected_rep)
@@ -197,6 +233,18 @@ def main():
     team_stats = db_queries.get_team_stats(accounts)
     rep_comparison = db_queries.get_rep_comparison(accounts)
 
+    # Calculate segment stats (if rep has segment)
+    segment_stats = None
+    segment_comparison = None
+    if rep_details:
+        # Filter accounts to segment
+        segment_accounts = sales_rep_queries.filter_accounts_by_segment(
+            accounts, rep_details['segment'], rep_segment_map
+        )
+        if segment_accounts:
+            segment_stats = db_queries.get_team_stats(segment_accounts)
+            segment_comparison = db_queries.get_rep_comparison(segment_accounts)
+
     # Find this rep's stats
     rep_stats = next((r for r in rep_comparison if r['rep_email'] == selected_rep), None)
 
@@ -204,54 +252,120 @@ def main():
         st.error("Could not find rep stats")
         return
 
-    # Header
+    # Header with segment info
+    st.markdown("---")
+
+    # Show rep header with segment
+    username = selected_rep.split('@')[0]
+    st.title(f"👤 {username}")
+
+    # Show segment and tenure info in a clean row below title
+    if rep_details:
+        joining_date_str = rep_details['joining_date'].strftime('%b %d, %Y')
+        col1, col2, col3 = st.columns([1, 1, 2])
+
+        with col1:
+            st.markdown(f"**💼 Segment:** {rep_details['segment'].title()}")
+
+        with col2:
+            st.markdown(f"**🗓️ Joined:** {joining_date_str}")
+
+        with col3:
+            st.markdown(f"**⏱️ Tenure:** {rep_details['days_tenure']} days")
+
     st.markdown("---")
 
     # Rep summary card
     rep_score = rep_stats['avg_overall_score']
     team_score = team_stats['avg_overall_score']
-    delta = rep_score - team_score
+    segment_score = segment_stats['avg_overall_score'] if segment_stats else None
 
-    col1, col2, col3, col4 = st.columns(4)
+    # Show metrics with segment comparison if available
+    if segment_score is not None:
+        col1, col2, col3, col4, col5 = st.columns(5)
 
-    with col1:
-        st.metric(
-            label="📊 Discovery Calls",
-            value=rep_stats['total_calls']
-        )
+        with col1:
+            st.metric(
+                label="📊 Calls",
+                value=rep_stats['total_calls']
+            )
 
-    with col2:
-        emoji = styling.get_score_emoji(rep_score)
-        st.metric(
-            label="🎯 Rep Score",
-            value=f"{emoji} {styling.format_score(rep_score)}"
-        )
+        with col2:
+            emoji = styling.get_score_emoji(rep_score)
+            st.metric(
+                label="🎯 Your Score",
+                value=f"{emoji} {styling.format_score(rep_score)}"
+            )
 
-    with col3:
-        team_emoji = styling.get_score_emoji(team_score)
-        st.metric(
-            label="👥 Team Average",
-            value=f"{team_emoji} {styling.format_score(team_score)}"
-        )
+        with col3:
+            seg_emoji = styling.get_score_emoji(segment_score)
+            segment_delta = rep_score - segment_score
+            st.metric(
+                label=f"💼 {rep_details['segment'].title()} Avg",
+                value=f"{seg_emoji} {styling.format_score(segment_score)}",
+                delta=styling.format_delta(segment_delta)
+            )
 
-    with col4:
-        delta_emoji = "📈" if delta > 0 else "📉" if delta < 0 else "→"
-        delta_color = "normal" if abs(delta) < 0.2 else ("inverse" if delta > 0 else "off")
-        st.metric(
-            label="vs Team",
-            value=f"{delta_emoji} {styling.format_delta(delta)}",
-            delta=None
-        )
+        with col4:
+            team_emoji = styling.get_score_emoji(team_score)
+            st.metric(
+                label="👥 Team Avg",
+                value=f"{team_emoji} {styling.format_score(team_score)}"
+            )
+
+        with col5:
+            team_delta = rep_score - team_score
+            delta_emoji = "📈" if team_delta > 0 else "📉" if team_delta < 0 else "→"
+            st.metric(
+                label="vs Team",
+                value=f"{delta_emoji} {styling.format_delta(team_delta)}"
+            )
+    else:
+        # Fallback to original 4-column layout
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric(
+                label="📊 Discovery Calls",
+                value=rep_stats['total_calls']
+            )
+
+        with col2:
+            emoji = styling.get_score_emoji(rep_score)
+            st.metric(
+                label="🎯 Rep Score",
+                value=f"{emoji} {styling.format_score(rep_score)}"
+            )
+
+        with col3:
+            team_emoji = styling.get_score_emoji(team_score)
+            st.metric(
+                label="👥 Team Average",
+                value=f"{team_emoji} {styling.format_score(team_score)}"
+            )
+
+        with col4:
+            delta = rep_score - team_score
+            delta_emoji = "📈" if delta > 0 else "📉" if delta < 0 else "→"
+            st.metric(
+                label="vs Team",
+                value=f"{delta_emoji} {styling.format_delta(delta)}"
+            )
 
     st.markdown("---")
 
-    # Rep vs Team Comparison Chart
+    # Rep vs Segment/Team Comparison Chart
     st.subheader("📊 Your MEDDPICC Scorecard")
-    st.markdown("Compare your performance against team averages. Bars sorted by biggest gaps.")
+
+    # Use segment comparison if available, otherwise team
+    comparison_label = f"{rep_details['segment'].title()} Peers" if segment_stats else "Team"
+    comparison_scores = segment_stats['avg_scores_by_dimension'] if segment_stats else team_stats['avg_scores_by_dimension']
+
+    st.markdown(f"Compare your performance against {comparison_label.lower()}.")
 
     comparison_chart = build_comparison_chart(
         rep_stats['avg_scores_by_dimension'],
-        team_stats['avg_scores_by_dimension'],
+        comparison_scores,
         selected_rep
     )
     st.plotly_chart(comparison_chart, use_container_width=True)
@@ -261,9 +375,13 @@ def main():
     # Top 3 Focus Areas
     st.subheader("🎯 Your Top 3 Focus Areas")
 
+    # Use segment comparison if available
+    comparison_scores_for_weakness = comparison_scores
+    comparison_label_lower = comparison_label.lower()
+
     strengths, weaknesses = metrics.get_rep_strengths_and_weaknesses(
         rep_stats['avg_scores_by_dimension'],
-        team_stats['avg_scores_by_dimension'],
+        comparison_scores_for_weakness,
         top_n=3
     )
 
@@ -273,7 +391,7 @@ def main():
         with st.expander(
             f"{severity_emoji} **{i}. {weakness['dimension_name']}** "
             f"(Your score: {styling.format_score(weakness['rep_score'])}, "
-            f"Team: {styling.format_score(weakness['team_score'])})",
+            f"{comparison_label}: {styling.format_score(weakness['team_score'])})",
             expanded=(i == 1)
         ):
             # Show what they're missing

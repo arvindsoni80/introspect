@@ -16,7 +16,7 @@ sys.path.insert(0, str(project_root))
 
 from src.config import load_settings
 from src.sqlite_repository import SQLiteCallRepository
-from streamlit_app.utils import db_queries, metrics, styling
+from streamlit_app.utils import db_queries, metrics, styling, sales_rep_queries
 
 # Page config
 st.set_page_config(
@@ -38,7 +38,12 @@ async def load_data(date_from=None, date_to=None):
             date_from=date_from,
             date_to=date_to
         )
-        return accounts
+
+        # Load sales rep data in the same async context
+        sales_reps = await sales_rep_queries.get_all_sales_reps(repo)
+        segments = await sales_rep_queries.get_segments(repo)
+
+        return accounts, sales_reps, segments
     finally:
         await repo.close()
 
@@ -158,15 +163,61 @@ def main():
 
     # Load data
     with st.spinner("Loading data..."):
-        accounts = asyncio.run(load_data(date_from, date_to))
+        accounts, sales_reps, segments = asyncio.run(load_data(date_from, date_to))
 
     if not accounts:
         st.warning("No discovery calls found for the selected date range.")
         return
 
-    # Get team stats
+    # Segment filter
+    segment_options = ["All Segments"] + segments
+    selected_segment = st.sidebar.selectbox(
+        "Sales Segment",
+        options=segment_options,
+        index=0
+    )
+
+    # Build rep segment map
+    rep_segment_map = sales_rep_queries.get_rep_segment_map(sales_reps)
+
+    # Filter accounts and calls by segment
+    if selected_segment != "All Segments":
+        # Filter accounts to only those with calls from this segment
+        accounts = sales_rep_queries.filter_accounts_by_segment(
+            accounts, selected_segment, rep_segment_map
+        )
+
+        # Also filter calls within each account
+        for account in accounts:
+            account.calls = sales_rep_queries.filter_calls_by_segment(
+                account.calls, selected_segment, rep_segment_map
+            )
+
+    if not accounts:
+        st.warning(f"No discovery calls found for {selected_segment} segment in the selected date range.")
+        return
+
+    # Show segment indicator
+    if selected_segment != "All Segments":
+        st.info(f"📊 Viewing: **{selected_segment}** Segment")
+
+    st.sidebar.markdown("---")
+
+    # Count reps in selected segment
+    if selected_segment != "All Segments":
+        segment_reps = [r for r in sales_reps if r['segment'] == selected_segment]
+        st.sidebar.info(f"**{len(segment_reps)}** reps in {selected_segment}")
+
+    # Get team stats (filtered by segment if selected)
     team_stats = db_queries.get_team_stats(accounts)
     rep_comparison = db_queries.get_rep_comparison(accounts)
+
+    # Filter rep comparison by segment if selected
+    if selected_segment != "All Segments":
+        rep_comparison = [
+            rep for rep in rep_comparison
+            if rep_segment_map.get(rep['rep_email']) == selected_segment
+        ]
 
     # Header metrics
     st.markdown("---")
