@@ -434,35 +434,36 @@ def main():
         # Convert to DataFrame
         df = pd.DataFrame(table_data)
 
-        # Display table
-        st.dataframe(
+        # Display table with row selection
+        st.markdown("**Click on a row to view account details**")
+
+        event = st.dataframe(
             df.drop(columns=['_domain']),
             column_config={
                 "Gong Link": st.column_config.LinkColumn("Gong Link", display_text="🔗 View"),
                 "Score": st.column_config.NumberColumn("Score", format="%.1f"),
             },
             hide_index=True,
-            use_container_width=True
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row"
         )
 
         st.markdown(f"**Showing {len(filtered_accounts)} account(s)**")
 
-        # Account selector for details
-        st.markdown("---")
-        st.markdown("### 🔍 View Account Details")
+        # Show selected account details
+        if event.selection.rows:
+            selected_row_idx = event.selection.rows[0]
+            selected_domain = table_data[selected_row_idx]['_domain']
 
-        selected_account_name = st.selectbox(
-            "Select an account to view details",
-            options=[""] + [a.domain for a in filtered_accounts],
-            format_func=lambda x: "Choose an account..." if x == "" else x
-        )
-
-        if selected_account_name:
-            # Find the selected account
-            selected_account = next((a for a in filtered_accounts if a.domain == selected_account_name), None)
+            selected_account = next(
+                (a for a in filtered_accounts if a.domain == selected_domain),
+                None
+            )
 
             if selected_account:
                 st.markdown("---")
+                st.markdown(f"### 📊 Account Details: {selected_domain}")
                 show_account_detail(selected_account)
     else:
         st.info("No accounts found matching the selected filter.")
