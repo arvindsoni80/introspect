@@ -1,124 +1,86 @@
-# Introspect Streamlit UI
+# Introspect Streamlit Dashboard
 
-Sales coaching and account qualification dashboard for MEDDPICC analysis.
+## Running the App
 
-## Quick Start
+### Prerequisites
 
-### 1. Install Dependencies
-
-From the `streamlit_app` directory:
+Make sure you have processed some calls first:
 
 ```bash
-pip install -r requirements_ui.txt
+# From the project root
+python process_calls.py --days 90 --limit 100
 ```
 
-Or from the project root:
+### Start the Dashboard
 
 ```bash
-pip install -r streamlit_app/requirements_ui.txt
-```
-
-### 2. Run the App
-
-From the `streamlit_app` directory:
-
-```bash
-streamlit run app.py
-```
-
-Or from the project root:
-
-```bash
+# From the project root
 streamlit run streamlit_app/app.py
 ```
 
 The app will open in your browser at `http://localhost:8501`
 
-## Pages
+## Navigation
 
-The UI has 4 main pages:
+### 📊 Summary
+Executive overview with two-panel comparison:
+- **KPIs**: Total calls, unique accounts, sales reps, calls/rep/day, accounts/rep
+- **Trends**: Daily bar charts showing call volume and account engagement
+- **Filters**: Date range (7/30/90 days), Stage filter
+- **Compare**: Select different segments in each panel to compare side-by-side
 
-1. **Home** (`app.py`) - Overview and quick stats
-2. **Team Coaching** - Team-wide MEDDPICC insights and coaching priorities
-3. **Rep Coaching** - Individual rep performance and coaching
-4. **Account Qualification** - Account health and red flags
+### 🏢 Accounts
+Account-level view with deal health and scoring:
+- Filter by segment and stage
+- View MEDDPICC, TRIAL, and CLOSE scores
+- See call history and participants
+- Track qualification gaps
 
-## Development Status
+### 👥 Reps
+Sales rep performance view:
+- Compare reps across frameworks
+- View strengths and weaknesses
+- Track individual call activity
 
-### Phase 1: Foundation ✅ COMPLETE
-- ✅ Database queries (`utils/db_queries.py`)
-- ✅ Metrics calculations (`utils/metrics.py`)
-- ✅ Styling and formatters (`utils/styling.py`)
-- ✅ Basic home page (`app.py`)
+## Filters
 
-### Phase 2: Team Coaching Dashboard (In Progress)
-- [ ] Team coaching page
-- [ ] MEDDPICC heatmap
-- [ ] Coaching priorities
-- [ ] Example calls
+All pages share common sidebar filters:
+- **Date Range**: Last 7 days, Last 30 days, Last 90 days
+- **Stage**: All Stages, Discovery, Trial, Negotiation, Closed
 
-### Phase 3: Rep Coaching Dashboard (Planned)
-- [ ] Rep selector
-- [ ] Rep vs team comparison
-- [ ] Focus areas
-- [ ] Progress tracking
+The Summary page adds independent segment selectors per panel.
 
-### Phase 4: Account Qualification Dashboard (Planned)
-- [ ] Account list with filters
-- [ ] Red flag detection
-- [ ] Account detail view
-- [ ] Evolution charts
+## Data Requirements
 
-## Project Structure
-
-```
-streamlit_app/
-├── app.py                  # Main home page
-├── pages/                  # Additional pages
-│   ├── 1_Team_Coaching.py
-│   ├── 2_Rep_Coaching.py
-│   └── 3_Account_Qualification.py
-├── utils/                  # Utility modules
-│   ├── __init__.py
-│   ├── db_queries.py       # Database query functions
-│   ├── metrics.py          # Metrics and insights
-│   └── styling.py          # Colors and formatters
-├── .streamlit/
-│   └── config.toml         # Streamlit configuration
-├── requirements_ui.txt     # UI dependencies
-└── README.md               # This file
-```
-
-## Data Source
-
-The UI reads from the SQLite database at `./data/calls.db` (configured in main `.env` file).
-
-Make sure to run the analyzer first to populate the database:
-
-```bash
-python main.py --sales-reps your@email.com
-```
-
-## Configuration
-
-Configuration is inherited from the main project's `.env` file:
-- Database path: `SQLITE_DB_PATH`
-
-UI-specific configuration is in `.streamlit/config.toml`:
-- Theme colors
-- Server settings
-- Browser settings
+The dashboard requires:
+- SQLite database at path specified in `.env` (default: `introspect.db`)
+- Processed calls with MEDDPICC, TRIAL, and CLOSE evaluations
+- Active sales reps defined in `sales_reps` table
 
 ## Troubleshooting
 
-**"No module named 'src'"**
-- The app needs to be run from the `streamlit_app/` directory or with the correct Python path
+**"No data available"**
+- Make sure you've run `process_calls.py` to populate the database
+- Check that your date range filter includes processed calls
 
-**"No accounts found in database"**
-- Run the analyzer first: `python main.py --sales-reps your@email.com`
+**"Module not found: streamlit_shadcn_ui"**
+- Install with: `pip install streamlit-shadcn-ui`
+- The app will work without it, using native Streamlit components
 
-**Database locked error**
-- Close any other connections to the database (DB Browser, other scripts, etc.)
+**Slow loading**
+- Large date ranges (90+ days) may take a few seconds to load
+- Consider narrowing your date range or optimizing queries
 
-**Port already in use**
-- Change port in `.streamlit/config.toml` or run with: `streamlit run app.py --server.port 8502`
+## Development
+
+To modify the dashboards:
+1. Edit files in `streamlit_app/pages/`
+2. Streamlit auto-reloads on file changes
+3. Click "Rerun" in the browser if needed
+
+## Technology Stack
+
+- **Streamlit**: Web framework
+- **Plotly**: Charts and visualizations
+- **SQLite**: Data storage
+- **streamlit-shadcn-ui**: UI components (optional)

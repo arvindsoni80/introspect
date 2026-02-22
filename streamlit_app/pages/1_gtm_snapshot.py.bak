@@ -1,0 +1,412 @@
+"""GTM Metrics Snapshot - Executive summary of sales scale and effectiveness."""
+
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, Optional
+from collections import defaultdict
+
+import streamlit as st
+
+# Add project root to path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from src.core import Config
+from src.data import Database, Repository
+
+# Page config
+st.set_page_config(
+    page_title="GTM Snapshot - Introspect",
+    page_icon="📊",
+    layout="wide"
+)
+
+
+def calculate_metrics(repo: Repository, segment: str, date_from: Optional[datetime] = None,
+                     date_to: Optional[datetime] = None) -> Dict:
+    """Calculate all metrics for a segment."""
+
+    # Build query for calls with filters
+    query_parts = ["SELECT * FROM calls WHERE 1=1"]
+    params = []
+
+    # Date range filter
+    if date_from:
+        query_parts.append("AND call_date >= ?")
+        params.append(date_from)
+    if date_to:
+        query_parts.append("AND call_date <= ?")
+        params.append(date_to)
+
+    query = " ".join(query_parts)
+    cursor = repo.conn.execute(query, params)
+    all_calls = cursor.fetchall()
+
+    # Load all accounts
+    all_accounts = repo.list_accounts()
+    accounts_by_id = {a.id: a for a in all_accounts}
+
+    # Filter calls by segment
+    segment_calls = []
+    segment_account_ids = set()
+
+    for call_row in all_calls:
+        account = accounts_by_id.get(call_row['account_id'])
+        if account and account.primary_segment == segment.lower():
+            segment_calls.append(call_row)
+            segment_account_ids.add(call_row['account_id'])
+
+    # === SALES SCALE METRICS ===
+
+    # Sales rep count
+    all_reps = repo.list_sales_reps(active_only=True)
+    segment_reps = [r for r in all_reps if r.segment == segment.lower()]
+    rep_count = len(segment_reps)
+
+    total_calls = len(segment_calls)
+    unique_accounts = len(segment_account_ids)
+    calls_per_account = total_calls / unique_accounts if unique_accounts > 0 else 0
+    calls_per_rep = total_calls / rep_count if rep_count > 0 else 0
+
+    # Active pipeline (accounts not closed)
+    active_accounts = [a for a in all_accounts
+                      if a.id in segment_account_ids and a.current_stage != "closed"]
+    active_pipeline = len(active_accounts)
+
+    # Stage distribution
+    stage_counts = defaultdict(int)
+    for account in active_accounts:
+        stage_counts[account.current_stage] += 1
+
+    total_active = len(active_accounts)
+    stage_distribution = {
+        "discovery": (stage_counts["discovery"] / total_active * 100) if total_active > 0 else 0,
+        "trial": (stage_counts["trial"] / total_active * 100) if total_active > 0 else 0,
+        "negotiation": (stage_counts["negotiation"] / total_active * 100) if total_active > 0 else 0,
+    }
+
+    # === SALES EFFECTIVENESS METRICS ===
+
+    # Calculate average scores by stage
+    discovery_scores = []
+    trial_scores = []
+    negotiation_scores = []
+
+    for call_row in segment_calls:
+        call = repo._row_to_call(call_row)
+
+        if call.primary_stage == "discovery":
+            scores = repo.get_call_meddpicc_scores(call.call_id)
+            if scores:
+                discovery_scores.append(scores.scores.overall_score)
+        elif call.primary_stage == "trial":
+            scores = repo.get_call_trial_scores(call.call_id)
+            if scores:
+                trial_scores.append(scores.scores.overall_score)
+        elif call.primary_stage == "negotiation":
+            scores = repo.get_call_close_scores(call.call_id)
+            if scores:
+                negotiation_scores.append(scores.scores.overall_score)
+
+    avg_meddpicc = sum(discovery_scores) / len(discovery_scores) if discovery_scores else 0
+    avg_trial = sum(trial_scores) / len(trial_scores) if trial_scores else 0
+    avg_close = sum(negotiation_scores) / len(negotiation_scores) if negotiation_scores else 0
+
+    # At-risk deals (trial or negotiation with score < 2.5)
+    at_risk_count = 0
+    trial_neg_accounts = [a for a in active_accounts if a.current_stage in ["trial", "negotiation"]]
+
+    for account in trial_neg_accounts:
+        query = """
+            SELECT * FROM calls
+            WHERE account_id = ? AND primary_stage = ?
+            ORDER BY call_date DESC
+            LIMIT 1
+        """
+        cursor = repo.conn.execute(query, (account.id, account.current_stage))
+        row = cursor.fetchone()
+
+        if row:
+            call = repo._row_to_call(row)
+            score = None
+
+            if account.current_stage == "trial":
+                scores = repo.get_call_trial_scores(call.call_id)
+                if scores:
+                    score = scores.scores.overall_score
+            elif account.current_stage == "negotiation":
+                scores = repo.get_call_close_scores(call.call_id)
+                if scores:
+                    score = scores.scores.overall_score
+
+            if score is not None and score < 2.5:
+                at_risk_count += 1
+
+    at_risk_rate = (at_risk_count / len(trial_neg_accounts) * 100) if trial_neg_accounts else 0
+
+    # Quality trend (compare to previous period)
+    # For now, we'll set this to None - can be calculated if we have historical data
+    quality_trend = None
+
+    return {
+        "rep_count": rep_count,
+        "total_calls": total_calls,
+        "calls_per_rep": calls_per_rep,
+        "unique_accounts": unique_accounts,
+        "calls_per_account": calls_per_account,
+        "active_pipeline": active_pipeline,
+        "stage_distribution": stage_distribution,
+        "avg_meddpicc": avg_meddpicc,
+        "avg_trial": avg_trial,
+        "avg_close": avg_close,
+        "at_risk_count": at_risk_count,
+        "at_risk_total": len(trial_neg_accounts),
+        "at_risk_rate": at_risk_rate,
+        "quality_trend": quality_trend,
+    }
+
+
+def main():
+    """Main GTM snapshot dashboard."""
+    st.title("📊 GTM Metrics Snapshot")
+    st.markdown("Executive summary of sales scale and effectiveness")
+
+    # Load database connection
+    config = Config()
+    db = Database(config.SQLITE_DB_PATH)
+    db.connect()
+    repo = Repository(db.conn)
+
+    try:
+        # Sidebar filters
+        st.sidebar.header("Filters")
+
+        # Date range
+        date_options = {
+            "Last 7 days": 7,
+            "Last 30 days": 30,
+            "Last 90 days": 90,
+            "Last 180 days": 180,
+            "All time": None
+        }
+
+        date_selection = st.sidebar.selectbox(
+            "Date Range",
+            options=list(date_options.keys()),
+            index=2  # Default to last 90 days
+        )
+
+        days = date_options[date_selection]
+        date_from = datetime.now() - timedelta(days=days) if days else None
+        date_to = None
+
+        # Segment selection
+        segment_options = ["Enterprise vs Mid-Enterprise", "Enterprise Only", "Mid-Enterprise Only"]
+        segment_selection = st.sidebar.selectbox(
+            "View",
+            options=segment_options,
+            index=0
+        )
+
+        st.sidebar.markdown("---")
+
+        # Glossary section
+        with st.sidebar.expander("📚 Scoring Glossary", expanded=False):
+            st.markdown("### MEDDPICC (Discovery)")
+            st.markdown("**Goal:** Qualify the opportunity")
+            st.markdown("""
+**Dimensions:**
+- **M**etrics: Quantifiable success metrics
+- **E**conomic Buyer: Budget holder identified
+- **D**ecision Criteria: Evaluation criteria documented
+- **D**ecision Process: Process mapped with timeline
+- **P**aper Process: Procurement/legal process
+- **I**dentify Pain: Business pain articulated
+- **C**hampion: Internal advocate identified
+- **C**ompetition: Competitive landscape understood
+
+**Scoring:**
+- **5**: Fully understood with specifics
+- **2**: Partially understood
+- **0**: Not understood
+            """)
+
+            st.markdown("---")
+            st.markdown("### TRIAL Health")
+            st.markdown("**Goal:** Assess trial health and likelihood to advance")
+            st.markdown("""
+**Dimensions:**
+- **T**echnical Validation: Product working successfully
+- **R**eadiness & Progress: On schedule with compelling results
+- **I**nternal Adoption: High user engagement
+- **A**dvocacy & Sentiment: Champion confident, stakeholders aligned
+- **L**andscape & Competition: Clear leader or sole vendor
+
+**Scoring:**
+- **5**: Healthy, no concerns
+- **2**: Some concerns, addressable
+- **0**: Critical issues
+            """)
+
+            st.markdown("---")
+            st.markdown("### CLOSE Health (Negotiation)")
+            st.markdown("**Goal:** Assess deal health and likelihood to close")
+            st.markdown("""
+**Dimensions:**
+- **C**ommercial Alignment: Pricing agreed, ROI compelling
+- **L**egal & Compliance: Requirements met
+- **O**rganizational Consensus: Stakeholders aligned
+- **S**ingle-Threading Risk: Multi-threaded relationships
+- **E**xecution Momentum: Active progress toward close
+
+**Scoring:**
+- **5**: Healthy, on track to close
+- **2**: Some concerns, needs attention
+- **0**: Critical blockers
+            """)
+
+        st.markdown("---")
+
+        # Calculate metrics based on selection
+        if segment_selection == "Enterprise vs Mid-Enterprise":
+            segments_to_show = [("Enterprise", "enterprise"), ("Mid-Enterprise", "mid-enterprise")]
+        elif segment_selection == "Enterprise Only":
+            segments_to_show = [("Enterprise", "enterprise")]
+        else:
+            segments_to_show = [("Mid-Enterprise", "mid-enterprise")]
+
+        # Load metrics for each segment
+        segment_metrics = {}
+        for display_name, segment_key in segments_to_show:
+            with st.spinner(f"Loading {display_name} metrics..."):
+                segment_metrics[display_name] = calculate_metrics(repo, segment_key, date_from, date_to)
+
+        # Display header
+        date_range_text = f"Last {days} days" if days else "All time"
+        st.markdown(f"### Period: {date_range_text}")
+        st.markdown("---")
+
+        # === SALES SCALE ===
+        st.markdown("## 📈 SALES SCALE")
+        st.markdown("*Activity and pipeline coverage metrics*")
+        st.markdown("")
+
+        # Create columns for metrics
+        if len(segments_to_show) == 2:
+            col1, col2 = st.columns(2)
+            cols = [col1, col2]
+        else:
+            cols = [st.container()]
+
+        for idx, (display_name, _) in enumerate(segments_to_show):
+            metrics = segment_metrics[display_name]
+
+            with cols[idx if len(cols) > 1 else 0]:
+                st.markdown(f"### {display_name}")
+
+                # Total calls (full width)
+                st.metric("Total Calls", f"{metrics['total_calls']}")
+
+                # Calls per rep metrics
+                subcol1, subcol2 = st.columns(2)
+                with subcol1:
+                    st.metric("Avg Calls per Rep", f"{metrics['calls_per_rep']:.1f}")
+                with subcol2:
+                    st.metric("Active Reps", f"{metrics['rep_count']}")
+
+                # Account metrics
+                subcol1, subcol2 = st.columns(2)
+                with subcol1:
+                    st.metric("Calls per Account", f"{metrics['calls_per_account']:.1f}")
+                with subcol2:
+                    st.metric("Unique Accounts", f"{metrics['unique_accounts']}")
+
+                st.markdown("**Stage Distribution:**")
+                st.markdown(f"- Discovery: {metrics['stage_distribution']['discovery']:.0f}%")
+                st.markdown(f"- Trial: {metrics['stage_distribution']['trial']:.0f}%")
+                st.markdown(f"- Negotiation: {metrics['stage_distribution']['negotiation']:.0f}%")
+
+        st.markdown("---")
+
+        # === SALES EFFECTIVENESS ===
+        st.markdown("## 🎯 SALES EFFECTIVENESS")
+        st.markdown("*Call quality and execution metrics*")
+        st.markdown("")
+
+        # Create columns for metrics
+        if len(segments_to_show) == 2:
+            col1, col2 = st.columns(2)
+            cols = [col1, col2]
+        else:
+            cols = [st.container()]
+
+        for idx, (display_name, _) in enumerate(segments_to_show):
+            metrics = segment_metrics[display_name]
+
+            with cols[idx if len(cols) > 1 else 0]:
+                st.markdown(f"### {display_name}")
+
+                # Average scores
+                st.metric("Avg MEDDPICC Score",
+                         f"{metrics['avg_meddpicc']:.1f}/5.0" if metrics['avg_meddpicc'] > 0 else "N/A")
+                st.metric("Avg Trial Health",
+                         f"{metrics['avg_trial']:.1f}/5.0" if metrics['avg_trial'] > 0 else "N/A")
+                st.metric("Avg Close Health",
+                         f"{metrics['avg_close']:.1f}/5.0" if metrics['avg_close'] > 0 else "N/A")
+
+                # At-risk deals
+                at_risk_display = f"{metrics['at_risk_rate']:.0f}% ({metrics['at_risk_count']}/{metrics['at_risk_total']})"
+                if metrics['at_risk_total'] == 0:
+                    at_risk_display = "N/A"
+                st.metric("At-Risk Deals", at_risk_display)
+
+                # Quality trend (placeholder for now)
+                # st.metric("Quality Trend", "↑ 0.3 pts" if metrics['quality_trend'] else "N/A")
+
+        st.markdown("---")
+
+        # Key insights
+        st.markdown("## 💡 Key Insights")
+
+        insights = []
+
+        for display_name, _ in segments_to_show:
+            metrics = segment_metrics[display_name]
+
+            # Generate insights
+            segment_insights = []
+
+            # Engagement depth
+            if metrics['calls_per_account'] >= 8:
+                segment_insights.append(f"**{display_name}**: Deep engagement with {metrics['calls_per_account']:.1f} calls per account")
+            elif metrics['calls_per_account'] >= 5:
+                segment_insights.append(f"**{display_name}**: Moderate engagement with {metrics['calls_per_account']:.1f} calls per account")
+            else:
+                segment_insights.append(f"**{display_name}**: Light engagement with {metrics['calls_per_account']:.1f} calls per account - consider increasing touch points")
+
+            # Trial health
+            if metrics['avg_trial'] >= 4.0:
+                segment_insights.append(f"**{display_name}**: Strong trial performance ({metrics['avg_trial']:.1f}/5.0) shows good product-market fit")
+            elif metrics['avg_trial'] >= 2.5 and metrics['avg_trial'] > 0:
+                segment_insights.append(f"**{display_name}**: Trial health at {metrics['avg_trial']:.1f}/5.0 - room for improvement")
+
+            # Discovery quality
+            if metrics['avg_meddpicc'] < 3.0 and metrics['avg_meddpicc'] > 0:
+                segment_insights.append(f"**{display_name}**: Discovery qualification needs improvement ({metrics['avg_meddpicc']:.1f}/5.0) - focus on MEDDPICC execution")
+
+            # At-risk
+            if metrics['at_risk_rate'] >= 25:
+                segment_insights.append(f"**{display_name}**: ⚠️ {metrics['at_risk_rate']:.0f}% of deals at-risk - needs immediate attention")
+
+            insights.extend(segment_insights)
+
+        for insight in insights:
+            st.markdown(f"- {insight}")
+
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()
