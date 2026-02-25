@@ -12,6 +12,7 @@ from ..domain import (
     CloseScores, CallCloseScores,
     WinLossAnalysis, CallWinLossAnalysis,
 )
+from ..services.persona_classifier import PersonaClassifier
 
 
 class Repository:
@@ -627,11 +628,18 @@ class Repository:
             if not speaker_id:
                 continue
 
+            # Classify persona based on title (only for external participants)
+            title = participant.get('title', '')
+            affiliation = participant.get('affiliation', '')
+            persona = None
+            if affiliation == 'External':
+                persona = PersonaClassifier.classify(title)
+
             self.conn.execute("""
                 INSERT INTO call_participants (
                     call_id, speaker_id, party_id, user_id,
-                    email_address, name, title, affiliation, phone_number
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    email_address, name, title, affiliation, phone_number, persona
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 call_id,
                 speaker_id,
@@ -639,9 +647,10 @@ class Repository:
                 participant.get('userId'),
                 participant.get('emailAddress'),
                 participant.get('name'),
-                participant.get('title'),
-                participant.get('affiliation'),
+                title,
+                affiliation,
                 participant.get('phoneNumber'),
+                persona,
             ))
             inserted_count += 1
 
@@ -666,6 +675,20 @@ class Repository:
         participants = {}
         for row in cursor.fetchall():
             speaker_id = row['speaker_id']
+
+            # Handle new columns safely (may not exist in older databases)
+            try:
+                speaker_questions = row['speaker_questions']
+                question_count = row['question_count'] if row['question_count'] is not None else 0
+            except (KeyError, IndexError):
+                speaker_questions = None
+                question_count = 0
+
+            try:
+                persona = row['persona']
+            except (KeyError, IndexError):
+                persona = None
+
             participants[speaker_id] = {
                 'speaker_id': speaker_id,
                 'party_id': row['party_id'],
@@ -675,6 +698,9 @@ class Repository:
                 'title': row['title'],
                 'affiliation': row['affiliation'],
                 'phone_number': row['phone_number'],
+                'speaker_questions': speaker_questions,
+                'question_count': question_count,
+                'persona': persona,
             }
 
         return participants

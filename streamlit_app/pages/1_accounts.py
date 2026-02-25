@@ -8,6 +8,7 @@ from typing import List, Optional, Dict
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
@@ -787,8 +788,9 @@ def build_table_data(accounts: List, stage: str, repo: Repository) -> List[Dict]
         if "@" in sales_rep:
             sales_rep = sales_rep.split("@")[0]
 
+        gong_link = format_gong_link(most_recent_call.call_id)
+
         row = {
-            "#": i,
             "Account": account.domain,
             "Stage": f"{stage_emoji} {account_stage.title()}",
             "Segment": (account.primary_segment or "unknown").title(),
@@ -796,17 +798,17 @@ def build_table_data(accounts: List, stage: str, repo: Repository) -> List[Dict]
             "# Calls": len(calls),
             "Days in Stage": account.days_in_current_stage() or 0,
             "Last Call": format_date(account.last_call_date),
-            "Gong Link": format_gong_link(most_recent_call.call_id),
+            "Call Title": most_recent_call.call_title,
+            "gong_link": gong_link,
             "_account_id": account.id,
             "_stage": account_stage
         }
 
-        # Add stage-specific columns
+        # Add stage-specific columns (Score and Key Gap for discovery)
         if account_stage == "discovery":
             if hasattr(most_recent_call, 'meddpicc_scores'):
                 score = most_recent_call.meddpicc_scores.overall_score
                 row["Score"] = f"{score:.1f}"
-                row["Status"] = f"{get_score_emoji(score)} {'Strong' if score >= 4 else 'Moderate' if score >= 2.5 else 'Weak'}"
 
                 # Find weakest dimension
                 dimensions = ["metrics", "economic_buyer", "decision_criteria", "decision_process",
@@ -818,30 +820,18 @@ def build_table_data(accounts: List, stage: str, repo: Repository) -> List[Dict]
         elif account_stage == "trial":
             if hasattr(most_recent_call, 'trial_scores'):
                 score = most_recent_call.trial_scores.overall_score
-                health = most_recent_call.trial_scores.health_interpretation or "unknown"
                 row["Score"] = f"{score:.1f}"
-                row["Health"] = f"{HEALTH_EMOJIS.get(health, '⚪')} {health.title()}"
                 row["Primary Concern"] = (most_recent_call.trial_scores.primary_concern_category or "none").title()
-                row["Likelihood"] = (most_recent_call.trial_scores.likelihood_to_advance or "unknown").title()
 
         elif account_stage == "negotiation":
             if hasattr(most_recent_call, 'close_scores'):
                 score = most_recent_call.close_scores.overall_score
-                health = most_recent_call.close_scores.health_interpretation or "unknown"
                 row["Score"] = f"{score:.1f}"
-                row["Health"] = f"{HEALTH_EMOJIS.get(health, '⚪')} {health.title()}"
                 row["Primary Concern"] = (most_recent_call.close_scores.primary_concern_category or "none").title()
-                row["Likelihood"] = (most_recent_call.close_scores.likelihood_to_close or "unknown").title()
 
         elif account_stage == "closed":
-            if hasattr(most_recent_call, 'winloss_analysis'):
-                outcome = most_recent_call.winloss_analysis.outcome
-                row["Outcome"] = f"{OUTCOME_EMOJIS.get(outcome, '⚪')} {outcome.title()}"
-                row["Stage of Decision"] = (most_recent_call.winloss_analysis.stage_of_decision or "unknown").title()
-                # Take first reason if it's a multi-line string
-                reasons = most_recent_call.winloss_analysis.primary_reasons or ""
-                first_reason = reasons.split('\n')[0] if reasons else "N/A"
-                row["Primary Reason"] = first_reason[:50] + "..." if len(first_reason) > 50 else first_reason
+            # Keep only basic info for closed deals
+            pass
 
         table_data.append(row)
 
@@ -1240,7 +1230,9 @@ def main():
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     """, unsafe_allow_html=True)
 
-    st.markdown('<h1><i class="fas fa-building" style="color: #3498db;"></i> Account Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 style="margin-bottom: 0;"><i class="fas fa-building" style="color: #3498db;"></i> Account Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown('<p style="color: #7f8c8d; margin-top: 0; margin-bottom: 1rem;">Track accounts across discovery, trial, negotiation, and closed stages</p>', unsafe_allow_html=True)
+    st.markdown("---")
 
     # Load segments from database first
     config = Config()
@@ -1343,8 +1335,6 @@ def main():
         return
 
     # Summary metrics
-    st.markdown("---")
-
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
@@ -1530,26 +1520,92 @@ def main():
             display_columns = [col for col in df.columns if not col.startswith('_')]
             display_df = df[display_columns]
 
-            # Display table with row selection
+            # Display table with AG Grid
             st.markdown("**Click on a row to view account details**")
 
-            event = st.dataframe(
+            # Configure AG Grid
+            gb = GridOptionsBuilder.from_dataframe(display_df)
+            gb.configure_default_column(
+                filterable=True,
+                sortable=True,
+                resizable=True,
+                filter=True
+            )
+            gb.configure_selection(
+                selection_mode='single',
+                use_checkbox=False,
+                header_checkbox=False
+            )
+
+            # Hide gong_link column (used for rendering)
+            gb.configure_column("gong_link", hide=True)
+
+            # Configure column widths
+            gb.configure_column("Account", width=150)
+            gb.configure_column("Stage", width=120)
+            gb.configure_column("Segment", width=100)
+            gb.configure_column("Sales Rep", width=120)
+            gb.configure_column("# Calls", width=80)
+            gb.configure_column("Days in Stage", width=120)
+            gb.configure_column("Last Call", width=120)
+            gb.configure_column("Score", width=80)
+            gb.configure_column("Key Gap", width=200)
+            gb.configure_column("Primary Concern", width=150)
+
+            # Make Call Title clickable - style it like a link and handle clicks
+            gb.configure_column(
+                "Call Title",
+                flex=1,
+                minWidth=300,
+                cellStyle={'color': '#1a73e8', 'textDecoration': 'underline', 'cursor': 'pointer'}
+            )
+
+            # Configure pagination
+            gb.configure_pagination(
+                enabled=True,
+                paginationPageSize=50
+            )
+
+            # Enable filtering in header
+            gb.configure_side_bar(
+                filters_panel=True,
+                columns_panel=False
+            )
+
+            # Build grid options
+            grid_options = gb.build()
+
+            # Add cell click handler for Call Title
+            grid_options['onCellClicked'] = JsCode("""
+                function(params) {
+                    if (params.column.colId === 'Call Title' && params.data.gong_link) {
+                        window.open(params.data.gong_link, '_blank');
+                    }
+                }
+            """)
+
+            # Display AG Grid
+            grid_response = AgGrid(
                 display_df,
-                column_config={
-                    "Gong Link": st.column_config.LinkColumn("Gong Link", display_text="🔗 View"),
-                },
-                hide_index=True,
-                width='stretch',
-                on_select="rerun",
-                selection_mode="single-row"
+                gridOptions=grid_options,
+                update_mode=GridUpdateMode.SELECTION_CHANGED,
+                data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+                fit_columns_on_grid_load=False,
+                theme='streamlit',
+                height=600,
+                allow_unsafe_jscode=True,
+                reload_data=False,
+                enable_enterprise_modules=False
             )
 
             st.markdown(f"**Showing {len(table_data)} account(s)**")
 
-            # Handle row selection with session state to persist across sorts
-            if event.selection.rows:
-                selected_row_idx = event.selection.rows[0]
-                selected_account_domain = table_data[selected_row_idx]['Account']
+            # Handle row selection with AG Grid
+            selected_rows = grid_response['selected_rows']
+            if selected_rows is not None and len(selected_rows) > 0:
+                # selected_rows is a DataFrame, use iloc to get first row
+                selected_row = selected_rows.iloc[0]
+                selected_account_domain = selected_row['Account']
                 st.session_state['selected_account_domain_main'] = selected_account_domain
 
         finally:

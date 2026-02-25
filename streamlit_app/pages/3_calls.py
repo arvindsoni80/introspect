@@ -8,6 +8,7 @@ from typing import List, Dict, Optional
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
@@ -17,7 +18,7 @@ sys.path.insert(0, str(project_root))
 pages_dir = Path(__file__).parent
 sys.path.insert(0, str(pages_dir))
 
-from src.core import Config
+from src.core import Config, LLMClient, GongClient
 from src.data import Database, Repository
 
 # Page config
@@ -84,6 +85,116 @@ def get_score_emoji(score: float) -> str:
 # Data Loading
 # ============================================================================
 
+def get_call_transcript(repo: Repository, gong_client: GongClient, call_id: str) -> Optional[str]:
+    """
+    Fetch and enrich transcript for a call.
+
+    Fetches from Gong API and enriches with participant names/roles.
+    Format: [Sales - John]: text or [Customer - Sarah]: text
+    """
+    try:
+        # Fetch raw transcript from Gong
+        transcripts = gong_client.get_transcripts([call_id])
+        raw_transcript = transcripts.get(call_id)
+
+        if not raw_transcript:
+            return None
+
+        # Enrich with participant info (replaces speaker IDs with names/roles)
+        enriched_transcript = repo.enrich_transcript_with_participants(call_id, raw_transcript)
+
+        return enriched_transcript
+
+    except Exception as e:
+        print(f"Error fetching transcript for {call_id}: {e}")
+        return None
+
+
+def build_analysis_context(repo: Repository, gong_client: GongClient, call_ids: List[str]) -> str:
+    """Build LLM context from selected calls."""
+    context_parts = []
+
+    context_parts.append(f"You are analyzing {len(call_ids)} sales call(s).\n")
+    context_parts.append("=" * 80)
+    context_parts.append("\n\n")
+
+    for i, call_id in enumerate(call_ids, 1):
+        # Get call metadata
+        cursor = repo.conn.execute("""
+            SELECT c.call_id, c.call_title, c.call_date, c.primary_stage,
+                   c.sales_rep_email, a.domain as account_domain
+            FROM calls c
+            JOIN accounts a ON c.account_id = a.id
+            WHERE c.call_id = ?
+        """, (call_id,))
+
+        call_row = cursor.fetchone()
+        if not call_row:
+            continue
+
+        context_parts.append(f"CALL {i}: {call_row['account_domain']} - {call_row['call_title']}")
+        context_parts.append(f"Date: {call_row['call_date']}")
+        context_parts.append(f"Stage: {call_row['primary_stage'].title()}")
+        context_parts.append(f"Sales Rep: {call_row['sales_rep_email']}")
+
+        # Get participants
+        participants = repo.get_call_participants(call_id)
+        if participants:
+            external = [p for p in participants.values() if p.get('affiliation') == 'External']
+            if external:
+                context_parts.append("Customer Participants:")
+                for p in external[:5]:  # Limit to 5
+                    name = p.get('name', 'Unknown')
+                    title = p.get('title', '')
+                    persona = p.get('persona', '')
+                    context_parts.append(f"  - {name}" + (f" ({title})" if title else "") + (f" [{persona}]" if persona else ""))
+
+        # Get scores if available
+        stage = call_row['primary_stage']
+        if stage == 'discovery':
+            scores = repo.get_call_meddpicc_scores(call_id)
+            if scores:
+                context_parts.append(f"MEDDPICC Score: {scores.scores.overall_score:.1f}/5.0")
+        elif stage == 'trial':
+            scores = repo.get_call_trial_scores(call_id)
+            if scores:
+                context_parts.append(f"Trial Health: {scores.scores.overall_score:.1f}/5.0 ({scores.scores.health_interpretation or 'unknown'})")
+        elif stage == 'negotiation':
+            scores = repo.get_call_close_scores(call_id)
+            if scores:
+                context_parts.append(f"Close Health: {scores.scores.overall_score:.1f}/5.0 ({scores.scores.health_interpretation or 'unknown'})")
+
+        # Get transcript (fetched from Gong and enriched with participant info)
+        transcript = get_call_transcript(repo, gong_client, call_id)
+        if transcript:
+            context_parts.append("\nTranscript (speaker format: [Role - Name]):")
+            context_parts.append(transcript[:20000])  # Limit transcript size per call
+            if len(transcript) > 20000:
+                context_parts.append("\n[... transcript truncated ...]")
+        else:
+            context_parts.append("\n[No transcript available]")
+
+        context_parts.append("\n" + "-" * 80 + "\n\n")
+
+    return "\n".join(context_parts)
+
+
+def analyze_calls_with_llm(llm_client: LLMClient, context: str, user_prompt: str) -> str:
+    """Send calls context and user prompt to LLM."""
+    full_prompt = f"""{context}
+
+USER QUESTION:
+{user_prompt}
+
+Please analyze the call(s) above and provide a comprehensive answer to the question."""
+
+    try:
+        response = llm_client.call_llm(full_prompt, max_tokens=4000)
+        return response
+    except Exception as e:
+        return f"Error analyzing calls: {str(e)}"
+
+
 def load_calls(repo: Repository, stage: Optional[str] = None, segment: Optional[str] = None,
                date_from: Optional[datetime] = None, date_to: Optional[datetime] = None) -> List:
     """Load calls from database with filtering."""
@@ -115,14 +226,14 @@ def load_calls(repo: Repository, stage: Optional[str] = None, segment: Optional[
         call = repo._row_to_call(row)
 
         # Load account to get segment
-        account = repo.get_account(call.account_id)
-        if account:
-            call.account_domain = account.domain
-            call.account_segment = account.primary_segment
+        account_obj = repo.get_account(call.account_id)
+        if account_obj:
+            call.account_domain = account_obj.domain
+            call.account_segment = account_obj.primary_segment
 
             # Filter by segment if specified
             if segment and segment != "All":
-                if account.primary_segment != segment.lower():
+                if account_obj.primary_segment != segment.lower():
                     continue
 
         # Load stage-specific scores
@@ -276,17 +387,17 @@ def build_calls_table(calls: List) -> List[Dict]:
         account = getattr(call, 'account_domain', 'Unknown')
         segment = getattr(call, 'account_segment', 'unknown')
 
+        gong_link = format_gong_link(call.call_id)
+
         row = {
-            "#": i,
             "Call Date": format_date(call.call_date),
             "Account": account,
             "Sales Rep": sales_rep,
             "Segment": segment.title() if segment else "Unknown",
             "Stage": f"{stage_emoji} {stage.title()}",
             "Score": f"{score:.1f}" if score is not None else "N/A",
-            "Status": status,
-            "Call Title": call.call_title[:60] + "..." if len(call.call_title) > 60 else call.call_title,
-            "Gong Link": format_gong_link(call.call_id),
+            "Call Title": call.call_title,
+            "gong_link": gong_link,  # Keep as regular column, will hide in grid
             "_call_id": call.call_id,
             "_call_date": call.call_date
         }
@@ -505,8 +616,15 @@ def show_call_detail(call, repo: Repository):
 
 def main():
     """Main calls dashboard."""
-    st.title("📞 Calls Dashboard")
-    st.markdown("Analyze individual calls across the pipeline")
+
+    # Load Font Awesome
+    st.markdown("""
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    """, unsafe_allow_html=True)
+
+    st.markdown('<h1 style="margin-bottom: 0;"><i class="fas fa-phone" style="color: #3498db;"></i> Calls Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown('<p style="color: #7f8c8d; margin-top: 0; margin-bottom: 1rem;">Analyze individual calls across the pipeline</p>', unsafe_allow_html=True)
+    st.markdown("---")
 
     # Load database connection
     config = Config()
@@ -612,8 +730,6 @@ def main():
 - **0**: Critical blockers
             """)
 
-        st.markdown("---")
-
         # Load filtered data
         with st.spinner("Loading calls..."):
             calls = load_calls(
@@ -629,8 +745,6 @@ def main():
             return
 
         # Summary metrics
-        st.markdown("---")
-
         # Calculate calls by stage with scores
         discovery_calls = [c for c in calls if c.primary_stage == "discovery" and hasattr(c, 'meddpicc_scores')]
         trial_calls = [c for c in calls if c.primary_stage == "trial" and hasattr(c, 'trial_scores')]
@@ -640,84 +754,296 @@ def main():
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            st.metric("📞 Total Calls", len(calls))
+            st.markdown(f"""
+                <div style="text-align: center; padding: 5px;">
+                    <p style="color: #7f8c8d; font-size: 0.85rem; margin: 0 0 3px 0;">
+                        <i class="fas fa-phone" style="color: #3498db;"></i> Total Calls
+                    </p>
+                    <p style="font-size: 1.8rem; font-weight: bold; margin: 0; line-height: 1;">{len(calls)}</p>
+                </div>
+            """, unsafe_allow_html=True)
 
         with col2:
             discovery_count = len([c for c in calls if c.primary_stage == "discovery"])
             if discovery_calls:
                 avg_discovery = sum(c.meddpicc_scores.overall_score for c in discovery_calls) / len(discovery_calls)
-                st.metric("🔍 Discovery", discovery_count, delta=f"Avg: {avg_discovery:.1f}")
+                st.markdown(f"""
+                    <div style="text-align: center; padding: 5px;">
+                        <p style="color: #7f8c8d; font-size: 0.85rem; margin: 0 0 3px 0;">
+                            <i class="fas fa-search" style="color: #3498db;"></i> Discovery
+                        </p>
+                        <p style="font-size: 1.8rem; font-weight: bold; margin: 0; line-height: 1;">{discovery_count}</p>
+                        <p style="font-size: 0.85rem; color: #7f8c8d; margin: 0;">Avg: {avg_discovery:.1f}</p>
+                    </div>
+                """, unsafe_allow_html=True)
             else:
-                st.metric("🔍 Discovery", discovery_count)
+                st.markdown(f"""
+                    <div style="text-align: center; padding: 5px;">
+                        <p style="color: #7f8c8d; font-size: 0.85rem; margin: 0 0 3px 0;">
+                            <i class="fas fa-search" style="color: #3498db;"></i> Discovery
+                        </p>
+                        <p style="font-size: 1.8rem; font-weight: bold; margin: 0; line-height: 1;">{discovery_count}</p>
+                    </div>
+                """, unsafe_allow_html=True)
 
         with col3:
             trial_count = len([c for c in calls if c.primary_stage == "trial"])
             if trial_calls:
                 avg_trial = sum(c.trial_scores.overall_score for c in trial_calls) / len(trial_calls)
-                st.metric("🧪 Trial", trial_count, delta=f"Avg: {avg_trial:.1f}")
+                st.markdown(f"""
+                    <div style="text-align: center; padding: 5px;">
+                        <p style="color: #7f8c8d; font-size: 0.85rem; margin: 0 0 3px 0;">
+                            <i class="fas fa-flask" style="color: #9b59b6;"></i> Trial
+                        </p>
+                        <p style="font-size: 1.8rem; font-weight: bold; margin: 0; line-height: 1;">{trial_count}</p>
+                        <p style="font-size: 0.85rem; color: #7f8c8d; margin: 0;">Avg: {avg_trial:.1f}</p>
+                    </div>
+                """, unsafe_allow_html=True)
             else:
-                st.metric("🧪 Trial", trial_count)
+                st.markdown(f"""
+                    <div style="text-align: center; padding: 5px;">
+                        <p style="color: #7f8c8d; font-size: 0.85rem; margin: 0 0 3px 0;">
+                            <i class="fas fa-flask" style="color: #9b59b6;"></i> Trial
+                        </p>
+                        <p style="font-size: 1.8rem; font-weight: bold; margin: 0; line-height: 1;">{trial_count}</p>
+                    </div>
+                """, unsafe_allow_html=True)
 
         with col4:
             negotiation_count = len([c for c in calls if c.primary_stage == "negotiation"])
             if negotiation_calls:
                 avg_negotiation = sum(c.close_scores.overall_score for c in negotiation_calls) / len(negotiation_calls)
-                st.metric("💼 Negotiation", negotiation_count, delta=f"Avg: {avg_negotiation:.1f}")
+                st.markdown(f"""
+                    <div style="text-align: center; padding: 5px;">
+                        <p style="color: #7f8c8d; font-size: 0.85rem; margin: 0 0 3px 0;">
+                            <i class="fas fa-handshake" style="color: #27ae60;"></i> Negotiation
+                        </p>
+                        <p style="font-size: 1.8rem; font-weight: bold; margin: 0; line-height: 1;">{negotiation_count}</p>
+                        <p style="font-size: 0.85rem; color: #7f8c8d; margin: 0;">Avg: {avg_negotiation:.1f}</p>
+                    </div>
+                """, unsafe_allow_html=True)
             else:
-                st.metric("💼 Negotiation", negotiation_count)
+                st.markdown(f"""
+                    <div style="text-align: center; padding: 5px;">
+                        <p style="color: #7f8c8d; font-size: 0.85rem; margin: 0 0 3px 0;">
+                            <i class="fas fa-handshake" style="color: #27ae60;"></i> Negotiation
+                        </p>
+                        <p style="font-size: 1.8rem; font-weight: bold; margin: 0; line-height: 1;">{negotiation_count}</p>
+                    </div>
+                """, unsafe_allow_html=True)
 
         st.markdown("---")
-
         # Scatter plot chart
         scatter_chart = build_calls_scatter_chart(calls)
         st.plotly_chart(scatter_chart, use_container_width=True)
 
-        st.markdown("---")
-
         # Calls table
-        st.markdown("### 📋 Call Details")
+        st.markdown('<h3><i class="fas fa-table" style="color: #3498db;"></i> Call Details</h3>', unsafe_allow_html=True)
         table_data = build_calls_table(calls)
 
         if not table_data:
             st.info("No call data available.")
             return
 
-        # Display table
+        # Display table with AG Grid (has built-in column filters)
         df = pd.DataFrame(table_data)
         display_columns = [col for col in df.columns if not col.startswith('_')]
         display_df = df[display_columns]
 
-        st.markdown("**Click on a row to view call details**")
+        st.markdown("**Select calls for analysis** • Click column headers to filter/sort • Hold Ctrl/Cmd to select multiple rows")
 
-        event = st.dataframe(
-            display_df,
-            column_config={
-                "Gong Link": st.column_config.LinkColumn("Gong Link", display_text="🔗 View"),
-            },
-            hide_index=True,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="single-row"
+        # Configure AG Grid
+        gb = GridOptionsBuilder.from_dataframe(display_df)
+        gb.configure_default_column(
+            filterable=True,
+            sortable=True,
+            resizable=True,
+            filter=True
+        )
+        gb.configure_selection(
+            selection_mode='multiple',
+            use_checkbox=True,
+            header_checkbox=True
         )
 
-        st.markdown(f"**Showing {len(table_data)} call(s)**")
+        # Hide gong_link column (used for rendering)
+        gb.configure_column("gong_link", hide=True)
 
-        # Handle row selection with session state to persist across sorts
-        if event.selection.rows:
-            selected_row_idx = event.selection.rows[0]
-            selected_call_id = table_data[selected_row_idx]['_call_id']
-            st.session_state['selected_call_id'] = selected_call_id
+        # Configure column widths
+        gb.configure_column("Call Date", width=120)
+        gb.configure_column("Account", width=150)
+        gb.configure_column("Sales Rep", width=120)
+        gb.configure_column("Segment", width=100)
+        gb.configure_column("Stage", width=120)
+        gb.configure_column("Score", width=80)
 
-        # Show selected call details from session state
-        if 'selected_call_id' in st.session_state:
-            selected_call = next(
-                (c for c in calls if c.call_id == st.session_state['selected_call_id']),
-                None
-            )
+        # Make Call Title clickable - style it like a link and handle clicks
+        gb.configure_column(
+            "Call Title",
+            flex=1,
+            minWidth=400,
+            cellStyle={'color': '#1a73e8', 'textDecoration': 'underline', 'cursor': 'pointer'}
+        )
 
-            if selected_call:
-                st.markdown("---")
-                show_call_detail(selected_call, repo)
+        # Configure pagination
+        gb.configure_pagination(
+            enabled=True,
+            paginationPageSize=50
+        )
+
+        # Enable filtering in header
+        gb.configure_side_bar(
+            filters_panel=True,
+            columns_panel=False
+        )
+
+        # Build grid options
+        grid_options = gb.build()
+
+        # Add cell click handler for Call Title
+        grid_options['onCellClicked'] = JsCode("""
+            function(params) {
+                if (params.column.colId === 'Call Title' && params.data.gong_link) {
+                    window.open(params.data.gong_link, '_blank');
+                }
+            }
+        """)
+
+        # Display AG Grid
+        grid_response = AgGrid(
+            display_df,
+            gridOptions=grid_options,
+            update_mode=GridUpdateMode.SELECTION_CHANGED,
+            data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+            fit_columns_on_grid_load=False,
+            theme='streamlit',
+            height=600,
+            allow_unsafe_jscode=True,
+            reload_data=False,
+            enable_enterprise_modules=False
+        )
+
+        selected_rows = grid_response['selected_rows']
+        if selected_rows is not None and len(selected_rows) > 0:
+            selected_df = pd.DataFrame(selected_rows)
+        else:
+            selected_df = pd.DataFrame()
+
+        st.markdown(f"**Selected: {len(selected_df)} call(s)**")
+
+        # ============================================================================
+        # Ad-hoc Analysis Section
+        # ============================================================================
+
+        if len(selected_df) > 0:
+            st.markdown("---")
+            st.markdown('<h3><i class="fas fa-search" style="color: #2ecc71;"></i> Ad-hoc Call Analysis</h3>', unsafe_allow_html=True)
+
+            # Get call IDs from selected rows
+            # Match selected rows back to original table_data to get _call_id
+            selected_call_ids = []
+            for _, selected_row in selected_df.iterrows():
+                # Find matching row in original table_data
+                for row in table_data:
+                    if (row['Account'] == selected_row['Account'] and
+                        row['Call Date'] == selected_row['Call Date'] and
+                        row['Call Title'] == selected_row['Call Title']):
+                        selected_call_ids.append(row['_call_id'])
+                        break
+
+            # Show selected calls summary
+            with st.expander(f"📋 Selected Calls ({len(selected_call_ids)})", expanded=False):
+                for _, row in selected_df.iterrows():
+                    st.markdown(f"- **{row['Account']}** - {row['Call Title'][:50]} ({row['Call Date']})")
+
+            # Analysis prompt input
+            col1, col2 = st.columns([3, 1])
+
+            with col1:
+                user_prompt = st.text_area(
+                    "Ask a question about the selected calls:",
+                    placeholder="Example: What are the main objections mentioned across these calls?",
+                    height=100,
+                    key="analysis_prompt"
+                )
+
+            with col2:
+                st.markdown("")  # Spacing
+                st.markdown("")  # Spacing
+                analyze_button = st.button(
+                    f"🔍 Analyze {len(selected_call_ids)} Call(s)",
+                    type="primary",
+                    use_container_width=True
+                )
+
+            # Perform analysis
+            if analyze_button and user_prompt.strip():
+                # Initialize clients
+                try:
+                    llm_client = LLMClient(
+                        anthropic_api_key=config.LLM_API_KEY,
+                        model=config.LLM_MODEL
+                    )
+
+                    gong_client = GongClient(
+                        access_key=config.GONG_ACCESS_KEY,
+                        secret_key=config.GONG_SECRET_KEY,
+                        api_url=config.GONG_API_URL,
+                        internal_domain=config.INTERNAL_DOMAIN,
+                    )
+
+                    with st.spinner(f"🤖 Fetching transcripts and analyzing {len(selected_call_ids)} call(s)... This may take 60-90 seconds."):
+                        # Build context (fetches transcripts from Gong and enriches)
+                        context = build_analysis_context(repo, gong_client, selected_call_ids)
+
+                        # Call LLM
+                        response = analyze_calls_with_llm(llm_client, context, user_prompt)
+
+                    # Display results
+                    st.markdown("#### 📊 Analysis Results")
+                    st.markdown(f"**Your Question:** {user_prompt}")
+                    st.markdown("---")
+                    st.markdown(response)
+
+                    # Show token estimate
+                    estimated_tokens = len(context.split()) + len(user_prompt.split()) + len(response.split())
+                    st.caption(f"_Estimated tokens used: ~{estimated_tokens:,}_")
+
+                except Exception as e:
+                    st.error(f"Error during analysis: {str(e)}")
+                    import traceback
+                    with st.expander("Error Details"):
+                        st.code(traceback.format_exc())
+
+            elif analyze_button and not user_prompt.strip():
+                st.warning("Please enter a question before analyzing.")
+
+            st.markdown("---")
+
+        # Handle single row selection - show detail view
+        if len(selected_df) == 1:
+            selected_row = selected_df.iloc[0]
+
+            # Find matching call_id from original table_data
+            selected_call_id = None
+            for row in table_data:
+                if (row['Account'] == selected_row['Account'] and
+                    row['Call Date'] == selected_row['Call Date'] and
+                    row['Call Title'] == selected_row['Call Title']):
+                    selected_call_id = row['_call_id']
+                    break
+
+            if selected_call_id:
+                # Find the call object
+                selected_call = next(
+                    (c for c in calls if c.call_id == selected_call_id),
+                    None
+                )
+
+                if selected_call:
+                    st.markdown("---")
+                    st.markdown("### 📄 Call Details")
+                    show_call_detail(selected_call, repo)
 
     finally:
         db.close()

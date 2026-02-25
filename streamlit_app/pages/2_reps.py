@@ -9,6 +9,7 @@ from collections import defaultdict
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
@@ -20,6 +21,7 @@ sys.path.insert(0, str(pages_dir))
 
 from src.core import Config
 from src.data import Database, Repository
+from src.domain import Call
 
 # Page config
 st.set_page_config(
@@ -410,9 +412,8 @@ def build_reps_table(rep_data: List[Dict]) -> List[Dict]:
     """Build table data for reps."""
     table_data = []
 
-    for i, rep in enumerate(rep_data, 1):
+    for rep in rep_data:
         row = {
-            "#": i,
             "Rep": rep["name"],
             "Segment": rep["segment"],
             "Calls": rep["total_calls"],
@@ -421,12 +422,414 @@ def build_reps_table(rep_data: List[Dict]) -> List[Dict]:
             "Trial Avg": f"{rep['trial_avg']:.1f}" if rep['trial_avg'] is not None else "N/A",
             "Negotiation Avg": f"{rep['negotiation_avg']:.1f}" if rep['negotiation_avg'] is not None else "N/A",
             "Active Deals": rep["active_deals"],
-            "At Risk": rep["at_risk_deals"],
             "_email": rep["email"]
         }
         table_data.append(row)
 
     return table_data
+
+
+# ============================================================================
+# Call Detail View
+# ============================================================================
+
+def show_call_detail(call: Call, repo: Repository):
+    """Show detailed analysis for a single call."""
+    # Get account info
+    account = repo.get_account(call.account_id)
+    account_domain = account.domain if account else "Unknown"
+
+    # Stage emoji
+    stage_emojis = {
+        "discovery": "🔍",
+        "trial": "🧪",
+        "negotiation": "💼",
+        "closed": "✅"
+    }
+    stage_emoji = stage_emojis.get(call.primary_stage, "📊")
+
+    # Header
+    st.markdown(f"## {stage_emoji} {call.call_title}")
+
+    # Metadata row
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"**Account:** {account_domain}")
+    with col2:
+        st.markdown(f"**Date:** {format_date(call.call_date)}")
+    with col3:
+        st.markdown(f"**Stage:** {call.primary_stage.title()}")
+
+    # Gong link
+    gong_link = format_gong_link(call.call_id)
+    st.markdown(f"[🔗 Open in Gong]({gong_link})")
+
+    # Get participants
+    cursor = repo.conn.execute(
+        "SELECT * FROM call_participants WHERE call_id = ?",
+        (call.call_id,)
+    )
+    participants = cursor.fetchall()
+
+    if participants:
+        external_participants = [p for p in participants if p['affiliation'] == 'External']
+        internal_participants = [p for p in participants if p['affiliation'] == 'Internal']
+
+        st.markdown(f"**Participants:** {len(internal_participants)} Internal, {len(external_participants)} External")
+
+        # Show participants in expandable section
+        with st.expander(f"👥 Call Attendees ({len(participants)} total)", expanded=False):
+            if internal_participants:
+                st.markdown("**Internal:**")
+                for p in internal_participants:
+                    try:
+                        name = p['name'] if p['name'] else 'Unknown'
+                    except (KeyError, TypeError):
+                        name = 'Unknown'
+
+                    try:
+                        email = p['email_address'] if p['email_address'] else ''
+                    except (KeyError, TypeError):
+                        email = ''
+
+                    st.markdown(f"• {name} {f'({email})' if email else ''}")
+
+            if external_participants:
+                st.markdown("**Customer:**")
+                for p in external_participants:
+                    try:
+                        name = p['name'] if p['name'] else 'Unknown'
+                    except (KeyError, TypeError):
+                        name = 'Unknown'
+
+                    try:
+                        title = p['title'] if p['title'] else ''
+                    except (KeyError, TypeError):
+                        title = ''
+
+                    try:
+                        persona = f" ({p['persona']})" if p['persona'] else ""
+                    except (KeyError, TypeError):
+                        persona = ""
+
+                    st.markdown(f"• **{name}** {f'({title})' if title else ''}{persona}")
+
+    st.markdown("---")
+
+    # Show scores based on stage
+    if call.primary_stage == "discovery":
+        scores = repo.get_call_meddpicc_scores(call.call_id)
+        if scores:
+            # Overall score
+            st.metric("MEDDPICC Score", f"{scores.scores.overall_score:.1f}/5.0")
+
+            # Dimension breakdown
+            st.markdown("**Dimension Scores:**")
+            cols = st.columns(4)
+            dimensions = [
+                ("Metrics", scores.scores.metrics),
+                ("Econ Buyer", scores.scores.economic_buyer),
+                ("Dec Criteria", scores.scores.decision_criteria),
+                ("Dec Process", scores.scores.decision_process),
+                ("Paper Process", scores.scores.paper_process),
+                ("Pain", scores.scores.identify_pain),
+                ("Champion", scores.scores.champion),
+                ("Competition", scores.scores.competition)
+            ]
+            for i, (label, score) in enumerate(dimensions):
+                cols[i % 4].metric(label, f"{score}/5")
+
+            # Show analysis
+            if scores.scores.meddpicc_summary:
+                st.markdown("**Summary:**")
+                st.markdown(f"> {scores.scores.meddpicc_summary}")
+
+            if scores.scores.key_gaps:
+                st.markdown("**Key Gaps:**")
+                st.markdown(f"> {scores.scores.key_gaps}")
+
+            if scores.scores.clarity_of_need:
+                st.markdown("**Clarity of Need:**")
+                st.markdown(f"> {scores.scores.clarity_of_need}")
+
+            if scores.scores.key_influencers:
+                st.markdown("**Key Influencers:**")
+                st.markdown(f"> {scores.scores.key_influencers}")
+
+            if scores.scores.next_steps:
+                st.markdown("**Next Steps:**")
+                st.markdown(f"> {scores.scores.next_steps}")
+
+            if scores.scores.trial_readiness:
+                st.markdown("**Trial Readiness:**")
+                st.markdown(f"> {scores.scores.trial_readiness}")
+
+    elif call.primary_stage == "trial":
+        scores = repo.get_call_trial_scores(call.call_id)
+        if scores:
+            # Overall score
+            health_emoji = {"healthy": "✅", "at_risk": "⚠️", "critical": "🔴"}.get(scores.scores.health_interpretation or "unknown", "⚪")
+            st.metric("Trial Health Score", f"{scores.scores.overall_score:.1f}/5.0")
+            st.markdown(f"**Health:** {health_emoji} {(scores.scores.health_interpretation or 'unknown').title()}")
+            if scores.scores.likelihood_to_advance:
+                st.markdown(f"**Likelihood to Advance:** {scores.scores.likelihood_to_advance.title()}")
+
+            # Dimension breakdown
+            st.markdown("**Dimension Scores:**")
+            cols = st.columns(5)
+            cols[0].metric("Tech Valid", f"{scores.scores.technical_validation}/5")
+            cols[1].metric("Readiness", f"{scores.scores.readiness_progress}/5")
+            cols[2].metric("Adoption", f"{scores.scores.internal_adoption}/5")
+            cols[3].metric("Advocacy", f"{scores.scores.advocacy_sentiment}/5")
+            cols[4].metric("Landscape", f"{scores.scores.landscape_competition}/5")
+
+            # Show concerns
+            if scores.scores.primary_concern_category and scores.scores.primary_concern_category != "none":
+                st.markdown(f"**Primary Concern:** {scores.scores.primary_concern_category.title()}")
+
+            if scores.scores.concern_severity:
+                st.markdown(f"**Concern Severity:** {scores.scores.concern_severity.title()}")
+
+            if scores.scores.is_bake_off:
+                st.warning("⚠️ **This is a competitive bake-off**")
+
+            if scores.scores.key_concerns:
+                st.markdown("**Key Concerns:**")
+                st.markdown(f"> {scores.scores.key_concerns}")
+
+            if scores.scores.recommended_actions:
+                st.markdown("**Recommended Actions:**")
+                st.markdown(f"> {scores.scores.recommended_actions}")
+
+            if scores.scores.next_steps:
+                st.markdown("**Next Steps:**")
+                st.markdown(f"> {scores.scores.next_steps}")
+
+    elif call.primary_stage == "negotiation":
+        scores = repo.get_call_close_scores(call.call_id)
+        if scores:
+            # Overall score
+            health_emoji = {"healthy": "✅", "at_risk": "⚠️", "critical": "🔴"}.get(scores.scores.health_interpretation or "unknown", "⚪")
+            st.metric("Deal Health Score", f"{scores.scores.overall_score:.1f}/5.0")
+            st.markdown(f"**Health:** {health_emoji} {(scores.scores.health_interpretation or 'unknown').title()}")
+            if scores.scores.likelihood_to_close:
+                st.markdown(f"**Likelihood to Close:** {scores.scores.likelihood_to_close.title()}")
+
+            # Dimension breakdown
+            st.markdown("**Dimension Scores:**")
+            cols = st.columns(5)
+            cols[0].metric("Commercial", f"{scores.scores.commercial_alignment}/5")
+            cols[1].metric("Legal", f"{scores.scores.legal_compliance}/5")
+            cols[2].metric("Consensus", f"{scores.scores.organizational_consensus}/5")
+            cols[3].metric("Threading", f"{scores.scores.single_threading_risk}/5")
+            cols[4].metric("Momentum", f"{scores.scores.execution_momentum}/5")
+
+            # Show concerns
+            if scores.scores.primary_concern_category and scores.scores.primary_concern_category != "none":
+                st.markdown(f"**Primary Concern:** {scores.scores.primary_concern_category.title()}")
+
+            if scores.scores.concern_severity:
+                st.markdown(f"**Concern Severity:** {scores.scores.concern_severity.title()}")
+
+            if scores.scores.has_competitive_pressure:
+                st.warning("⚠️ **Competitive pressure present**")
+
+            if scores.scores.key_concerns:
+                st.markdown("**Key Concerns:**")
+                st.markdown(f"> {scores.scores.key_concerns}")
+
+            if scores.scores.recommended_actions:
+                st.markdown("**Recommended Actions:**")
+                st.markdown(f"> {scores.scores.recommended_actions}")
+
+            if scores.scores.next_steps:
+                st.markdown("**Next Steps:**")
+                st.markdown(f"> {scores.scores.next_steps}")
+
+
+# ============================================================================
+# Recommended Calls
+# ============================================================================
+
+def get_recommended_calls_for_rep(repo: Repository, rep_email: str, rep_segment: str,
+                                   date_from: Optional[datetime] = None,
+                                   date_to: Optional[datetime] = None) -> List[tuple]:
+    """Find exemplar calls for rep's weak dimensions."""
+
+    # Get rep's dimension scores by stage
+    rep_scores = {
+        'discovery': {},
+        'trial': {},
+        'negotiation': {}
+    }
+
+    # Build query for rep's calls
+    query_parts = ["SELECT * FROM calls WHERE sales_rep_email = ?"]
+    params = [rep_email]
+
+    if date_from:
+        query_parts.append("AND call_date >= ?")
+        params.append(date_from)
+    if date_to:
+        query_parts.append("AND call_date <= ?")
+        params.append(date_to)
+
+    query = " ".join(query_parts)
+    cursor = repo.conn.execute(query, params)
+    rep_call_rows = cursor.fetchall()
+
+    # Calculate rep's dimension averages
+    discovery_dims = defaultdict(list)
+    trial_dims = defaultdict(list)
+    negotiation_dims = defaultdict(list)
+
+    for call_row in rep_call_rows:
+        call = repo._row_to_call(call_row)
+
+        if call.primary_stage == "discovery":
+            scores = repo.get_call_meddpicc_scores(call.call_id)
+            if scores:
+                s = scores.scores
+                discovery_dims['metrics'].append(s.metrics)
+                discovery_dims['economic_buyer'].append(s.economic_buyer)
+                discovery_dims['decision_criteria'].append(s.decision_criteria)
+                discovery_dims['decision_process'].append(s.decision_process)
+                discovery_dims['paper_process'].append(s.paper_process)
+                discovery_dims['identify_pain'].append(s.identify_pain)
+                discovery_dims['champion'].append(s.champion)
+                discovery_dims['competition'].append(s.competition)
+
+        elif call.primary_stage == "trial":
+            scores = repo.get_call_trial_scores(call.call_id)
+            if scores:
+                s = scores.scores
+                trial_dims['technical_validation'].append(s.technical_validation)
+                trial_dims['readiness_progress'].append(s.readiness_progress)
+                trial_dims['internal_adoption'].append(s.internal_adoption)
+                trial_dims['advocacy_sentiment'].append(s.advocacy_sentiment)
+                trial_dims['landscape_competition'].append(s.landscape_competition)
+
+        elif call.primary_stage == "negotiation":
+            scores = repo.get_call_close_scores(call.call_id)
+            if scores:
+                s = scores.scores
+                negotiation_dims['commercial_alignment'].append(s.commercial_alignment)
+                negotiation_dims['legal_compliance'].append(s.legal_compliance)
+                negotiation_dims['organizational_consensus'].append(s.organizational_consensus)
+                negotiation_dims['single_threading_risk'].append(s.single_threading_risk)
+                negotiation_dims['execution_momentum'].append(s.execution_momentum)
+
+    # Calculate averages and identify weak dimensions
+    weak_dimensions = []
+
+    for stage, dims_dict in [('discovery', discovery_dims), ('trial', trial_dims), ('negotiation', negotiation_dims)]:
+        for dim_key, scores in dims_dict.items():
+            if scores:
+                avg = sum(scores) / len(scores)
+                if avg < 3.5:  # Weak dimension
+                    weak_dimensions.append((stage, dim_key, avg))
+
+    # Sort by score (weakest first) and take top 3
+    weak_dimensions.sort(key=lambda x: x[2])
+    weak_dimensions = weak_dimensions[:3]
+
+    if not weak_dimensions:
+        return []
+
+    # Find high-scoring calls for weak dimensions
+    # Collect up to 2-3 calls per weak dimension to ensure coverage across stages
+    # Returns list of tuples: (call, dimension_display_name, dimension_score)
+    recommended_calls = []
+    seen_call_ids = set()
+    calls_per_dimension = 2  # Max 2 calls per weak dimension
+
+    # Dimension key to display name mapping
+    dimension_display_names = {
+        # Discovery
+        'metrics': 'Metrics',
+        'economic_buyer': 'Economic Buyer',
+        'decision_criteria': 'Decision Criteria',
+        'decision_process': 'Decision Process',
+        'paper_process': 'Paper Process',
+        'identify_pain': 'Identify Pain',
+        'champion': 'Champion',
+        'competition': 'Competition',
+        # Trial
+        'technical_validation': 'Technical Validation',
+        'readiness_progress': 'Readiness & Progress',
+        'internal_adoption': 'Internal Adoption',
+        'advocacy_sentiment': 'Advocacy & Sentiment',
+        'landscape_competition': 'Landscape & Competition',
+        # Negotiation
+        'commercial_alignment': 'Commercial Alignment',
+        'legal_compliance': 'Legal & Compliance',
+        'organizational_consensus': 'Organizational Consensus',
+        'single_threading_risk': 'Single-Threading Risk',
+        'execution_momentum': 'Execution Momentum'
+    }
+
+    for stage, dim_key, _ in weak_dimensions:
+        dimension_calls = []
+        dimension_display_name = dimension_display_names.get(dim_key, dim_key.replace('_', ' ').title())
+
+        # Query for high-scoring calls in same segment
+        query_parts = ["""
+            SELECT c.* FROM calls c
+            JOIN accounts a ON c.account_id = a.id
+            WHERE c.primary_stage = ?
+            AND a.primary_segment = ?
+        """]
+        params = [stage, rep_segment.lower()]
+
+        if date_from:
+            query_parts.append("AND c.call_date >= ?")
+            params.append(date_from)
+        if date_to:
+            query_parts.append("AND c.call_date <= ?")
+            params.append(date_to)
+
+        query_parts.append("ORDER BY c.call_date DESC")
+        query = " ".join(query_parts)
+
+        cursor = repo.conn.execute(query, params)
+        candidate_rows = cursor.fetchall()
+
+        # Filter for high scores on this dimension
+        for call_row in candidate_rows:
+            call = repo._row_to_call(call_row)
+
+            if call.call_id in seen_call_ids:
+                continue
+
+            dim_score = None
+
+            if stage == "discovery":
+                scores = repo.get_call_meddpicc_scores(call.call_id)
+                if scores:
+                    dim_score = getattr(scores.scores, dim_key, None)
+            elif stage == "trial":
+                scores = repo.get_call_trial_scores(call.call_id)
+                if scores:
+                    dim_score = getattr(scores.scores, dim_key, None)
+            elif stage == "negotiation":
+                scores = repo.get_call_close_scores(call.call_id)
+                if scores:
+                    dim_score = getattr(scores.scores, dim_key, None)
+
+            if dim_score is not None and dim_score >= 4.5:
+                # Store as tuple: (call, dimension_name, dimension_score)
+                dimension_calls.append((call, dimension_display_name, dim_score))
+                seen_call_ids.add(call.call_id)
+
+                # Limit calls per dimension
+                if len(dimension_calls) >= calls_per_dimension:
+                    break
+
+        # Add this dimension's calls to overall list
+        recommended_calls.extend(dimension_calls)
+
+    # Return up to 10 calls total (allows for 3 dimensions x 2-3 calls each)
+    return recommended_calls[:10]
 
 
 # ============================================================================
@@ -655,52 +1058,194 @@ def show_rep_detail(rep_email: str, repo: Repository, date_from: Optional[dateti
 
         st.markdown("---")
 
-    # Recent calls
-    st.markdown("### 📞 Recent Calls")
-    st.markdown(f"Showing last 10 calls")
+    # Recommended calls to review
+    st.markdown("### 📚 Recommended Calls To Review")
 
-    recent_calls_data = []
-    for call_row in call_rows[:10]:
-        call = repo._row_to_call(call_row)
+    # Get weak dimensions for context
+    rep_segment = rep.segment or "enterprise"
 
-        # Get account
-        account = repo.get_account(call.account_id)
-        account_domain = account.domain if account else "Unknown"
+    # Calculate weak dimensions to show what we're targeting
+    weak_dims_info = []
 
-        # Get score
-        score = "N/A"
-        if call.primary_stage == "discovery":
-            scores = repo.get_call_meddpicc_scores(call.call_id)
-            if scores:
-                score = f"{scores.scores.overall_score:.1f}"
-        elif call.primary_stage == "trial":
-            scores = repo.get_call_trial_scores(call.call_id)
-            if scores:
-                score = f"{scores.scores.overall_score:.1f}"
-        elif call.primary_stage == "negotiation":
-            scores = repo.get_call_close_scores(call.call_id)
-            if scores:
-                score = f"{scores.scores.overall_score:.1f}"
+    # Discovery dimensions
+    if discovery_dimension_scores:
+        dim_avgs = {dim: sum(scores) / len(scores) for dim, scores in discovery_dimension_scores.items()}
+        for dim, avg in dim_avgs.items():
+            if avg < 3.5:
+                weak_dims_info.append(f"{dim} (Discovery: {avg:.1f})")
 
-        recent_calls_data.append({
-            "Date": format_date(call.call_date),
-            "Account": account_domain,
-            "Stage": call.primary_stage.title(),
-            "Score": score,
-            "Title": call.call_title[:60] + "..." if len(call.call_title) > 60 else call.call_title,
-            "Gong": format_gong_link(call.call_id)
-        })
+    # Trial dimensions
+    if trial_dimension_scores:
+        dim_avgs = {dim: sum(scores) / len(scores) for dim, scores in trial_dimension_scores.items()}
+        for dim, avg in dim_avgs.items():
+            if avg < 3.5:
+                weak_dims_info.append(f"{dim} (Trial: {avg:.1f})")
 
-    if recent_calls_data:
-        df = pd.DataFrame(recent_calls_data)
-        st.dataframe(
-            df,
-            column_config={
-                "Gong": st.column_config.LinkColumn("Gong", display_text="🔗 View"),
-            },
-            hide_index=True,
-            use_container_width=True
+    # Negotiation dimensions
+    if negotiation_dimension_scores:
+        dim_avgs = {dim: sum(scores) / len(scores) for dim, scores in negotiation_dimension_scores.items()}
+        for dim, avg in dim_avgs.items():
+            if avg < 3.5:
+                weak_dims_info.append(f"{dim} (Negotiation: {avg:.1f})")
+
+    if weak_dims_info:
+        st.markdown(f"**Growth areas:** {', '.join(weak_dims_info[:3])}")
+
+    st.markdown(f"Showing high-scoring calls from **{rep_segment.title()}** segment")
+
+    recommended_calls = get_recommended_calls_for_rep(
+        repo, rep_email, rep_segment, date_from, date_to
+    )
+
+    if recommended_calls:
+        # Build table data using same format as Calls page
+        # recommended_calls is list of tuples: (call, dimension_name, dimension_score)
+        recommended_table_data = []
+        for call, target_dimension, dimension_score in recommended_calls:
+            # Get account
+            account = repo.get_account(call.account_id)
+            account_domain = account.domain if account else "Unknown"
+            segment = account.primary_segment if account else "unknown"
+
+            # Get sales rep (format email)
+            sales_rep = call.sales_rep_email
+            if "@" in sales_rep:
+                sales_rep = sales_rep.split("@")[0]
+
+            # Get stage with emoji
+            stage_emojis = {
+                "discovery": "🔍",
+                "trial": "🧪",
+                "negotiation": "💼",
+                "closed": "✅"
+            }
+            stage_emoji = stage_emojis.get(call.primary_stage, "📊")
+            stage = f"{stage_emoji} {call.primary_stage.title()}"
+
+            # Get score
+            score = None
+            if call.primary_stage == "discovery":
+                scores = repo.get_call_meddpicc_scores(call.call_id)
+                if scores:
+                    score = scores.scores.overall_score
+            elif call.primary_stage == "trial":
+                scores = repo.get_call_trial_scores(call.call_id)
+                if scores:
+                    score = scores.scores.overall_score
+            elif call.primary_stage == "negotiation":
+                scores = repo.get_call_close_scores(call.call_id)
+                if scores:
+                    score = scores.scores.overall_score
+
+            gong_link = format_gong_link(call.call_id)
+
+            row = {
+                "Call Date": format_date(call.call_date),
+                "Account": account_domain,
+                "Sales Rep": sales_rep,
+                "Stage": stage,
+                "Score": f"{score:.1f}" if score is not None else "N/A",
+                "Strong In": target_dimension,
+                "Dimension Score": f"{dimension_score:.1f}",
+                "Call Title": call.call_title,
+                "gong_link": gong_link,
+                "_call_id": call.call_id,
+                "_call_date": call.call_date
+            }
+            recommended_table_data.append(row)
+
+        # Display with AG Grid (same format as Calls page)
+        df = pd.DataFrame(recommended_table_data)
+        display_columns = [col for col in df.columns if not col.startswith('_')]
+        display_df = df[display_columns]
+
+        # Configure AG Grid
+        gb = GridOptionsBuilder.from_dataframe(display_df)
+        gb.configure_default_column(
+            filterable=False,
+            sortable=True,
+            resizable=True
         )
+        gb.configure_selection(
+            selection_mode='single',
+            use_checkbox=False,
+            header_checkbox=False
+        )
+
+        # Configure column widths
+        gb.configure_column("Call Date", width=110)
+        gb.configure_column("Account", width=140)
+        gb.configure_column("Sales Rep", width=110)
+        gb.configure_column("Stage", width=110)
+        gb.configure_column("Score", width=70)
+        gb.configure_column("Strong In", width=180)
+        gb.configure_column("Dimension Score", width=130)
+
+        # Make Call Title clickable
+        gb.configure_column("gong_link", hide=True)
+        gb.configure_column(
+            "Call Title",
+            flex=1,
+            minWidth=300,
+            cellStyle={'color': '#1a73e8', 'textDecoration': 'underline', 'cursor': 'pointer'}
+        )
+
+        # Build grid options
+        grid_options = gb.build()
+
+        # Add cell click handler for Call Title
+        grid_options['onCellClicked'] = JsCode("""
+            function(params) {
+                if (params.column.colId === 'Call Title' && params.data.gong_link) {
+                    window.open(params.data.gong_link, '_blank');
+                }
+            }
+        """)
+
+        # Display AG Grid
+        grid_response = AgGrid(
+            display_df,
+            gridOptions=grid_options,
+            update_mode=GridUpdateMode.SELECTION_CHANGED,
+            data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+            fit_columns_on_grid_load=False,
+            theme='streamlit',
+            height=min(400, len(recommended_table_data) * 50 + 100),
+            allow_unsafe_jscode=True,
+            reload_data=False,
+            enable_enterprise_modules=False
+        )
+
+        st.markdown(f"*Showing {len(recommended_calls)} recommended call(s). Click a row to view details.*")
+
+        # Handle row selection - show call detail
+        selected_rows = grid_response['selected_rows']
+        if selected_rows is not None and len(selected_rows) > 0:
+            selected_row = selected_rows.iloc[0]
+            selected_call_id = None
+
+            # Find the call ID from the original data
+            for row in recommended_table_data:
+                if (row['Call Date'] == selected_row['Call Date'] and
+                    row['Call Title'] == selected_row['Call Title'] and
+                    row['Account'] == selected_row['Account']):
+                    selected_call_id = row['_call_id']
+                    break
+
+            if selected_call_id:
+                # Find the call object (recommended_calls contains tuples: (call, dim_name, dim_score))
+                selected_call = None
+                for call, dim_name, dim_score in recommended_calls:
+                    if call.call_id == selected_call_id:
+                        selected_call = call
+                        break
+
+                if selected_call:
+                    st.markdown("---")
+                    show_call_detail(selected_call, repo)
+    else:
+        st.info("No recommended calls found. This rep is performing well across all dimensions!")
+
 
 
 # ============================================================================
@@ -709,8 +1254,15 @@ def show_rep_detail(rep_email: str, repo: Repository, date_from: Optional[dateti
 
 def main():
     """Main reps dashboard."""
-    st.title("👥 Reps Dashboard")
-    st.markdown("Compare sales rep performance and identify coaching opportunities")
+
+    # Load Font Awesome
+    st.markdown("""
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    """, unsafe_allow_html=True)
+
+    st.markdown('<h1 style="margin-bottom: 0;"><i class="fas fa-users" style="color: #3498db;"></i> Sales Reps Performance</h1>', unsafe_allow_html=True)
+    st.markdown('<p style="color: #7f8c8d; margin-top: 0; margin-bottom: 1rem;">Compare sales rep performance and identify coaching opportunities</p>', unsafe_allow_html=True)
+    st.markdown("---")
 
     # Load database connection
     config = Config()
@@ -816,8 +1368,6 @@ def main():
 - **0**: Critical blockers
             """)
 
-        st.markdown("---")
-
         # Load filtered data
         with st.spinner("Loading rep performance data..."):
             rep_data = load_rep_performance(
@@ -833,41 +1383,77 @@ def main():
             return
 
         # Summary metrics
-        st.markdown("---")
-
         col1, col2, col3, col4 = st.columns(4)
 
+        # Calculate metrics
+        total_calls = sum(r["total_calls"] for r in rep_data)
+        total_accounts = sum(r["total_accounts"] for r in rep_data)
+
+        # Calculate team average score (across all stages)
+        all_scores = []
+        for r in rep_data:
+            if r["discovery_avg"]:
+                all_scores.append(r["discovery_avg"])
+            if r["trial_avg"]:
+                all_scores.append(r["trial_avg"])
+            if r["negotiation_avg"]:
+                all_scores.append(r["negotiation_avg"])
+
+        team_avg = sum(all_scores) / len(all_scores) if all_scores else 0
+        team_avg_color = "#2ecc71" if team_avg >= 4.0 else "#f39c12" if team_avg >= 2.0 else "#e74c3c"
+        team_avg_display = f"{team_avg:.1f}" if team_avg > 0 else "N/A"
+
+        # Calculate calls per rep per day
+        if days and len(rep_data) > 0:
+            calls_per_rep_day = total_calls / len(rep_data) / days
+        else:
+            calls_per_rep_day = 0
+
         with col1:
-            st.metric("👥 Active Reps", len(rep_data))
+            st.markdown(f"""
+                <div style="text-align: center; padding: 5px;">
+                    <p style="color: #7f8c8d; font-size: 0.85rem; margin: 0 0 3px 0;">
+                        <i class="fas fa-users" style="color: #3498db;"></i> Active Reps
+                    </p>
+                    <p style="font-size: 1.8rem; font-weight: bold; margin: 0; line-height: 1;">{len(rep_data)}</p>
+                </div>
+            """, unsafe_allow_html=True)
 
         with col2:
-            # Calculate total calls across all reps
-            total_calls = sum(r["total_calls"] for r in rep_data)
-            st.metric("📞 Total Calls", total_calls)
+            st.markdown(f"""
+                <div style="text-align: center; padding: 5px;">
+                    <p style="color: #7f8c8d; font-size: 0.85rem; margin: 0 0 3px 0;">
+                        <i class="fas fa-chart-line" style="color: {team_avg_color};"></i> Avg Team Score
+                    </p>
+                    <p style="font-size: 1.8rem; font-weight: bold; margin: 0; color: {team_avg_color}; line-height: 1;">{team_avg_display}</p>
+                </div>
+            """, unsafe_allow_html=True)
 
         with col3:
-            # Calculate total accounts across all reps
-            total_accounts = sum(r["total_accounts"] for r in rep_data)
-            st.metric("🏢 Total Accounts", total_accounts)
+            st.markdown(f"""
+                <div style="text-align: center; padding: 5px;">
+                    <p style="color: #7f8c8d; font-size: 0.85rem; margin: 0 0 3px 0;">
+                        <i class="fas fa-phone" style="color: #27ae60;"></i> Total Calls
+                    </p>
+                    <p style="font-size: 1.8rem; font-weight: bold; margin: 0; line-height: 1;">{total_calls}</p>
+                </div>
+            """, unsafe_allow_html=True)
 
         with col4:
-            # Calculate team average score (across all stages)
-            all_scores = []
-            for r in rep_data:
-                if r["discovery_avg"]:
-                    all_scores.append(r["discovery_avg"])
-                if r["trial_avg"]:
-                    all_scores.append(r["trial_avg"])
-                if r["negotiation_avg"]:
-                    all_scores.append(r["negotiation_avg"])
-
-            if all_scores:
-                team_avg = sum(all_scores) / len(all_scores)
-                st.metric("📈 Team Avg Score", f"{team_avg:.1f}")
-            else:
-                st.metric("📈 Team Avg Score", "N/A")
+            st.markdown(f"""
+                <div style="text-align: center; padding: 5px;">
+                    <p style="color: #7f8c8d; font-size: 0.85rem; margin: 0 0 3px 0;">
+                        <i class="fas fa-calendar-day" style="color: #9b59b6;"></i> Calls/Rep/Day
+                    </p>
+                    <p style="font-size: 1.8rem; font-weight: bold; margin: 0; line-height: 1;">{calls_per_rep_day:.1f}</p>
+                </div>
+            """, unsafe_allow_html=True)
 
         st.markdown("---")
+
+        # Team Performance Section
+        st.markdown('<h2><i class="fas fa-chart-bar" style="color: #2ecc71;"></i> Team Performance</h2>', unsafe_allow_html=True)
+        st.markdown("")
 
         # Comparison chart
         chart_metric = st.selectbox(
@@ -883,7 +1469,7 @@ def main():
 
         comparison_chart = build_rep_comparison_chart(rep_data, chart_metric)
         if comparison_chart:
-            st.plotly_chart(comparison_chart, use_container_width=True)
+            st.plotly_chart(comparison_chart, width="stretch")
         else:
             st.info("No data available for selected metric.")
 
@@ -901,42 +1487,92 @@ def main():
         if selected_stage:
             heatmap = build_dimension_heatmap(repo, rep_emails, selected_stage, date_from, date_to)
             if heatmap:
-                st.plotly_chart(heatmap, use_container_width=True)
+                st.plotly_chart(heatmap, width="stretch")
             else:
                 st.info("No dimension data available for heatmap.")
 
         st.markdown("---")
 
         # Reps table
-        st.markdown("### 📊 Rep Performance")
+        st.markdown('<h3><i class="fas fa-table" style="color: #3498db;"></i> Rep Performance</h3>', unsafe_allow_html=True)
         table_data = build_reps_table(rep_data)
 
         if not table_data:
             st.info("No rep data available.")
             return
 
-        # Display table
+        # Display table with AG Grid
         df = pd.DataFrame(table_data)
         display_columns = [col for col in df.columns if not col.startswith('_')]
         display_df = df[display_columns]
 
         st.markdown("**Click on a row to view rep details**")
 
-        event = st.dataframe(
+        # Configure AG Grid
+        gb = GridOptionsBuilder.from_dataframe(display_df)
+        gb.configure_default_column(
+            filterable=True,
+            sortable=True,
+            resizable=True,
+            filter=True
+        )
+        gb.configure_selection(
+            selection_mode='single',
+            use_checkbox=False,
+            header_checkbox=False
+        )
+
+        # Configure column widths
+        gb.configure_column("Rep", width=150)
+        gb.configure_column("Segment", width=120)
+        gb.configure_column("Calls", width=100)
+        gb.configure_column("Accounts", width=120)
+        gb.configure_column("Discovery Avg", width=130)
+        gb.configure_column("Trial Avg", width=120)
+        gb.configure_column("Negotiation Avg", width=150)
+        gb.configure_column("Active Deals", width=130)
+
+        # Configure pagination
+        gb.configure_pagination(
+            enabled=True,
+            paginationPageSize=50
+        )
+
+        # Enable filtering in header
+        gb.configure_side_bar(
+            filters_panel=True,
+            columns_panel=False
+        )
+
+        # Build grid options
+        grid_options = gb.build()
+
+        # Display AG Grid
+        grid_response = AgGrid(
             display_df,
-            hide_index=True,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="single-row"
+            gridOptions=grid_options,
+            update_mode=GridUpdateMode.SELECTION_CHANGED,
+            data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+            fit_columns_on_grid_load=False,
+            theme='streamlit',
+            height=600,
+            allow_unsafe_jscode=True,
+            reload_data=False,
+            enable_enterprise_modules=False
         )
 
         st.markdown(f"**Showing {len(table_data)} rep(s)**")
 
-        # Handle row selection with session state
-        if event.selection.rows:
-            selected_row_idx = event.selection.rows[0]
-            selected_rep_email = table_data[selected_row_idx]['_email']
-            st.session_state['selected_rep_email'] = selected_rep_email
+        # Handle row selection with AG Grid
+        selected_rows = grid_response['selected_rows']
+        if selected_rows is not None and len(selected_rows) > 0:
+            # selected_rows is a DataFrame, use iloc to get first row
+            selected_row = selected_rows.iloc[0]
+            # Need to find the email from the original table_data using the Rep name
+            selected_rep_name = selected_row['Rep']
+            selected_rep_email = next((r['_email'] for r in table_data if r['Rep'] == selected_rep_name), None)
+            if selected_rep_email:
+                st.session_state['selected_rep_email'] = selected_rep_email
 
         # Show selected rep details from session state
         if 'selected_rep_email' in st.session_state:

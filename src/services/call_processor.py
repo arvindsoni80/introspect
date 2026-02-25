@@ -13,6 +13,7 @@ from ..domain import (
 )
 from .stage_classifier import StageClassifier
 from .evaluators import MEDDPICCEvaluator, TrialEvaluator, CloseEvaluator, WinLossAnalyzer
+from .question_extractor import QuestionExtractor
 
 
 class CallProcessor:
@@ -45,6 +46,7 @@ class CallProcessor:
         self.trial_evaluator = TrialEvaluator(llm_client)
         self.close_evaluator = CloseEvaluator(llm_client)
         self.winloss_analyzer = WinLossAnalyzer(llm_client)
+        self.question_extractor = QuestionExtractor(llm_client)
 
     def process_call(self, call_data: dict, transcript: str) -> Call:
         """
@@ -138,6 +140,9 @@ class CallProcessor:
         participants_count = len(self.repository.get_call_participants(gong_call_id))
         if participants_count > 0:
             print(f"✓ Enriched transcript with {participants_count} participants")
+
+        # 6d. Extract questions from external participants
+        self._extract_questions(call, enriched_transcript)
 
         # 7. Evaluate based on stage (using enriched transcript)
         print(f"\n→ Evaluating {stage_result.primary_stage} stage...")
@@ -267,6 +272,51 @@ class CallProcessor:
         )
         self.repository.create_call_win_loss_analysis(call_analysis)
         print("  ✓ Win/Loss analysis saved")
+
+    def _extract_questions(self, call: Call, transcript: str):
+        """Extract questions from external participants."""
+        try:
+            # Get participants for this call
+            participants = self.repository.get_call_participants(call.call_id)
+
+            if not participants:
+                return
+
+            # Extract questions (only from external participants)
+            questions_by_speaker = self.question_extractor.extract_questions_for_call(
+                transcript, participants
+            )
+
+            if not questions_by_speaker:
+                return
+
+            # Store in database
+            total_questions = 0
+            for speaker_id, questions in questions_by_speaker.items():
+                if not questions:
+                    continue
+
+                question_count = len(questions)
+                total_questions += question_count
+
+                # Format for storage
+                questions_json = self.question_extractor.format_questions_for_storage(questions)
+
+                # Update database
+                self.repository.conn.execute("""
+                    UPDATE call_participants
+                    SET speaker_questions = ?,
+                        question_count = ?
+                    WHERE call_id = ? AND speaker_id = ?
+                """, (questions_json, question_count, call.call_id, speaker_id))
+
+            self.repository.conn.commit()
+
+            if total_questions > 0:
+                print(f"✓ Extracted {total_questions} questions from external participants")
+
+        except Exception as e:
+            print(f"⚠️  Failed to extract questions: {e}")
 
     def _update_account_after_call(self, account: Account, call: Call):
         """Update account state after processing a call.
