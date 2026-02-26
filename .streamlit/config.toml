@@ -1,0 +1,22 @@
+[server]
+# Run in headless mode for Cloud Run
+headless = true
+
+# Port will be set via environment variable in Cloud Run
+port = 8080
+
+# Enable CORS for all origins (adjust in production if needed)
+enableCORS = false
+enableXsrfProtection = false
+
+# Address to bind to
+address = "0.0.0.0"
+
+[browser]
+# Don't automatically open browser (for Cloud Run)
+gatherUsageStats = false
+serverAddress = "0.0.0.0"
+
+[theme]
+# Optional: Customize theme
+primaryColor = "#3498db"

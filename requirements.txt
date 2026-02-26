@@ -6,6 +6,10 @@ pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
 click>=8.1.0
 
+# Google Cloud dependencies (for Cloud Run deployment)
+google-cloud-storage>=2.14.0
+google-cloud-secret-manager>=2.18.0
+
 # Optional dependencies
 pandas>=2.0.0
 
@@ -13,6 +17,7 @@ pandas>=2.0.0
 streamlit>=1.31.0
 plotly>=5.18.0
 streamlit-aggrid>=1.0.0
+streamlit-shadcn-ui>=0.1.19
 
 # Development dependencies
 pytest>=7.4.0
@@ -20,4 +25,4 @@ pytest-asyncio>=0.21.0
 pytest-cov>=4.1.0
 black>=23.0.0
 ruff>=0.1.0
-streamlit-shadcn-ui
+
