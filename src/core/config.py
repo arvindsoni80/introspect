@@ -1,0 +1,68 @@
+"""Configuration management."""
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+
+class Config:
+    """Application configuration loaded from environment variables."""
+
+    def __init__(self):
+        """Load configuration from .env file or environment variables."""
+        # Load .env file from project root if it exists (for local development)
+        # In Cloud Run, environment variables will be set by startup.py from Secret Manager
+        env_path = Path(__file__).parent.parent.parent / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+
+        # Gong API
+        self.GONG_API_URL = os.getenv("GONG_API_URL", "https://api.gong.io/v2")
+        self.GONG_ACCESS_KEY = os.getenv("GONG_ACCESS_KEY", "")
+        self.GONG_SECRET_KEY = os.getenv("GONG_SECRET_KEY", "")
+        try:
+            self.GONG_LOOKBACK_DAYS = int(os.getenv("GONG_LOOKBACK_DAYS", "7"))
+        except (ValueError, TypeError) as e:
+            lookback_value = os.getenv("GONG_LOOKBACK_DAYS")
+            print(f"⚠️  Invalid GONG_LOOKBACK_DAYS value: '{lookback_value}'. Expected integer. Using default: 7")
+            self.GONG_LOOKBACK_DAYS = 7
+        self.INTERNAL_DOMAIN = os.getenv("INTERNAL_DOMAIN", "")
+
+        # LLM - Map old LLM_API_KEY to ANTHROPIC_API_KEY for Cloud Run compatibility
+        self.LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")
+        self.LLM_API_KEY = os.getenv("ANTHROPIC_API_KEY") or os.getenv("LLM_API_KEY", "")
+        self.LLM_MODEL = os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001")
+
+        # Slack
+        self.SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
+        self.SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID", "")
+
+        # Database - Default to data/introspect.db for Cloud Run, introspect.db for local
+        default_db_path = "data/introspect.db" if os.getenv("K_SERVICE") else "introspect.db"
+        self.DB_TYPE = os.getenv("DB_TYPE", "sqlite")
+        self.SQLITE_DB_PATH = self._expand_path(
+            os.getenv("SQLITE_DB_PATH", default_db_path)
+        )
+
+    def _expand_path(self, path: str) -> str:
+        """Expand ~ and environment variables in path."""
+        expanded = os.path.expanduser(path)
+        expanded = os.path.expandvars(expanded)
+        return expanded
+
+    def validate(self) -> bool:
+        """Check if required config is present."""
+        required = []
+
+        if not self.GONG_ACCESS_KEY:
+            required.append("GONG_ACCESS_KEY")
+        if not self.GONG_SECRET_KEY:
+            required.append("GONG_SECRET_KEY")
+        if not self.LLM_API_KEY:
+            required.append("ANTHROPIC_API_KEY or LLM_API_KEY")
+
+        if required:
+            print(f"⚠️  Missing required environment variables: {', '.join(required)}")
+            return False
+
+        return True

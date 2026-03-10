@@ -577,14 +577,7 @@ def render_panel(repo: Repository, panel_id: str, segment: str,
 def main():
     """Main Summary dashboard."""
 
-    # Load Font Awesome
-    st.markdown("""
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    """, unsafe_allow_html=True)
-
-    st.markdown('<h1 style="margin-bottom: 0;"><i class="fas fa-chart-line" style="color: #3498db;"></i> Summary</h1>', unsafe_allow_html=True)
-    st.markdown('<p style="color: #7f8c8d; margin-top: 0; margin-bottom: 1rem;">Sales activity and engagement overview</p>', unsafe_allow_html=True)
-    st.markdown("---")
+    st.markdown("### Sales activity and engagement overview")
 
     # Load database connection
     config = Config()

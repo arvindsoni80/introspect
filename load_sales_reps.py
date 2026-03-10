@@ -1,129 +1,151 @@
 #!/usr/bin/env python3
-"""
-Load sales rep data from CSV into database.
+"""Load sales reps from CSV (no header) into database."""
 
-Usage:
-    python load_sales_reps.py
-"""
-
-import asyncio
-import csv
 import sys
-from datetime import datetime
+import csv
 from pathlib import Path
+from datetime import datetime
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.config import load_settings
-from src.sqlite_repository import SQLiteCallRepository
+from src.core import Config
+from src.data import Database, Repository
+from src.domain import SalesRep
 
 
-async def load_sales_reps(csv_file: str = "sales_rep_data.csv"):
-    """Load sales rep data from CSV into database."""
-
-    # Load settings
-    settings = load_settings()
-    repo = SQLiteCallRepository(settings.sqlite_db_path)
-
+def parse_date(date_str: str):
+    """Parse date from MM/DD/YYYY format."""
     try:
-        csv_path = Path(csv_file)
-        if not csv_path.exists():
-            print(f"❌ Error: CSV file not found: {csv_file}")
-            sys.exit(1)
+        return datetime.strptime(date_str, "%m/%d/%Y").date()
+    except ValueError:
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return None
 
-        print(f"📂 Loading sales rep data from: {csv_file}")
 
-        # Read CSV
-        sales_reps = []
-        with open(csv_path, 'r') as f:
-            for line_num, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
+def main():
+    print("📊 Loading Sales Reps from CSV (no header)\n")
+    print("=" * 70)
 
-                # Parse CSV line: email, segment, joining_date
-                parts = [p.strip() for p in line.split(',')]
-                if len(parts) != 3:
-                    print(f"⚠️  Warning: Line {line_num} has {len(parts)} fields (expected 3), skipping")
-                    continue
+    # Load config
+    print("\n1. Loading configuration...")
+    config = Config()
+    db_path = config.SQLITE_DB_PATH
+    print(f"   ✓ Database path: {db_path}")
 
-                email, segment, joining_date_str = parts
+    # Check if CSV exists
+    csv_path = Path("sales_rep.csv")
+    if not csv_path.exists():
+        print(f"\n❌ Error: sales_rep.csv not found")
+        return
 
-                # Parse date (format: MM/DD/YYYY)
-                try:
-                    joining_date = datetime.strptime(joining_date_str, "%m/%d/%Y")
-                except ValueError:
-                    print(f"⚠️  Warning: Line {line_num} has invalid date format '{joining_date_str}', skipping")
-                    continue
+    print(f"   ✓ Found CSV: {csv_path}")
 
-                sales_reps.append({
-                    'email': email,
-                    'segment': segment,
-                    'joining_date': joining_date
-                })
+    # Connect to database
+    print("\n2. Connecting to database...")
+    db = Database(db_path)
+    db.connect()
+    repo = Repository(db.conn)
+    print("   ✓ Connected")
 
-        if not sales_reps:
-            print("⚠️  No valid sales rep data found in CSV")
-            return
+    # Read CSV (no header, format: email, segment, joining_date)
+    print("\n3. Reading CSV file...")
+    print("   Format: email, segment, joining_date")
+    sales_reps = []
 
-        print(f"\n📊 Found {len(sales_reps)} sales reps")
+    with open(csv_path, 'r') as f:
+        reader = csv.reader(f)
 
-        # Group by segment for summary
-        segments = {}
-        for rep in sales_reps:
-            seg = rep['segment']
-            segments[seg] = segments.get(seg, 0) + 1
+        for row_num, row in enumerate(reader, start=1):
+            if len(row) < 3:
+                print(f"   ⚠️  Row {row_num}: Expected 3 columns, got {len(row)}, skipping")
+                continue
 
-        for segment, count in sorted(segments.items()):
-            print(f"   • {segment}: {count} reps")
+            email = row[0].strip()
+            segment = row[1].strip()
+            joining_date_str = row[2].strip()
 
-        # Insert into database
-        now = datetime.now().isoformat()
-        inserted = 0
-        updated = 0
+            if not email or not segment or not joining_date_str:
+                print(f"   ⚠️  Row {row_num}: Missing data, skipping")
+                continue
 
-        for rep in sales_reps:
-            # Check if rep already exists
-            cursor = repo.conn.execute(
-                "SELECT email FROM sales_reps WHERE email = ?",
-                (rep['email'],)
+            # Parse date
+            joining_date = parse_date(joining_date_str)
+            if not joining_date:
+                print(f"   ⚠️  Row {row_num}: Invalid date '{joining_date_str}', skipping")
+                continue
+
+            # Create SalesRep
+            rep = SalesRep(
+                email=email,
+                segment=segment,
+                joining_date=joining_date,
+                is_active=True,
+                left_date=None,
             )
-            exists = cursor.fetchone() is not None
+            sales_reps.append(rep)
 
-            # Insert or update
-            repo.conn.execute(
-                """
-                INSERT OR REPLACE INTO sales_reps (email, segment, joining_date, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    rep['email'],
-                    rep['segment'],
-                    rep['joining_date'].isoformat(),
-                    now if not exists else repo.conn.execute(
-                        "SELECT created_at FROM sales_reps WHERE email = ?",
-                        (rep['email'],)
-                    ).fetchone()[0],
-                    now
-                )
-            )
+    print(f"   ✓ Parsed {len(sales_reps)} sales reps")
 
-            if exists:
-                updated += 1
-            else:
-                inserted += 1
+    if not sales_reps:
+        print("\n❌ No valid sales reps found")
+        db.close()
+        return
 
-        repo.conn.commit()
+    # Display
+    print("\n4. Sales reps to be loaded:")
+    print("-" * 70)
+    for rep in sales_reps:
+        print(f"   • {rep.email:30s} | {rep.segment:15s} | {rep.joining_date}")
 
-        print(f"\n✅ Success!")
-        print(f"   • Inserted: {inserted} new reps")
-        print(f"   • Updated: {updated} existing reps")
-        print(f"   • Database: {settings.sqlite_db_path}")
+    # Insert
+    print("\n5. Inserting into database...")
+    inserted = 0
+    updated = 0
 
-    finally:
-        await repo.close()
+    for rep in sales_reps:
+        existing = repo.get_sales_rep(rep.email)
+
+        if existing:
+            print(f"   → Updating {rep.email}")
+            existing.segment = rep.segment
+            existing.joining_date = rep.joining_date
+            existing.is_active = True
+            repo.update_sales_rep(existing)
+            updated += 1
+        else:
+            print(f"   → Creating {rep.email}")
+            repo.create_sales_rep(rep)
+            inserted += 1
+
+    db.conn.commit()
+    db.close()
+
+    # Summary
+    print("\n" + "=" * 70)
+    print("✅ COMPLETE")
+    print("=" * 70)
+    print(f"\nResults:")
+    print(f"   Inserted: {inserted} new")
+    print(f"   Updated:  {updated} existing")
+    print(f"   Total:    {inserted + updated}")
+
+    # Verify
+    print("\n6. Verification:")
+    print("-" * 70)
+
+    db = Database(db_path)
+    db.connect()
+    repo = Repository(db.conn)
+
+    all_reps = repo.list_sales_reps(active_only=True)
+    for rep in sorted(all_reps, key=lambda r: r.email):
+        print(f"   • {rep.email:30s} | {rep.segment:15s} | {rep.days_tenure:4d} days")
+
+    db.close()
+    print(f"\n✅ Done! {len(all_reps)} active sales reps in database\n")
 
 
 if __name__ == "__main__":
-    asyncio.run(load_sales_reps())
+    main()
