@@ -20,7 +20,12 @@ class Config:
         self.GONG_API_URL = os.getenv("GONG_API_URL", "https://api.gong.io/v2")
         self.GONG_ACCESS_KEY = os.getenv("GONG_ACCESS_KEY", "")
         self.GONG_SECRET_KEY = os.getenv("GONG_SECRET_KEY", "")
-        self.GONG_LOOKBACK_DAYS = int(os.getenv("GONG_LOOKBACK_DAYS", "7"))
+        try:
+            self.GONG_LOOKBACK_DAYS = int(os.getenv("GONG_LOOKBACK_DAYS", "7"))
+        except (ValueError, TypeError) as e:
+            lookback_value = os.getenv("GONG_LOOKBACK_DAYS")
+            print(f"⚠️  Invalid GONG_LOOKBACK_DAYS value: '{lookback_value}'. Expected integer. Using default: 7")
+            self.GONG_LOOKBACK_DAYS = 7
         self.INTERNAL_DOMAIN = os.getenv("INTERNAL_DOMAIN", "")
 
         # LLM - Map old LLM_API_KEY to ANTHROPIC_API_KEY for Cloud Run compatibility
@@ -54,7 +59,7 @@ class Config:
         if not self.GONG_SECRET_KEY:
             required.append("GONG_SECRET_KEY")
         if not self.LLM_API_KEY:
-            required.append("LLM_API_KEY")
+            required.append("ANTHROPIC_API_KEY or LLM_API_KEY")
 
         if required:
             print(f"⚠️  Missing required environment variables: {', '.join(required)}")

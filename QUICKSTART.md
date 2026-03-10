@@ -36,6 +36,7 @@ gcloud services enable run.googleapis.com
 gcloud services enable storage.googleapis.com
 gcloud services enable secretmanager.googleapis.com
 gcloud services enable cloudbuild.googleapis.com
+gcloud services enable artifactregistry.googleapis.com
 ```
 
 ### 3. Create Cloud Storage Bucket & Upload Database

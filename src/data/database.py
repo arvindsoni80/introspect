@@ -109,6 +109,10 @@ def init_database(db_path: str, reset: bool = False) -> Database:
     Returns:
         Connected Database instance
     """
+    # Ensure parent directory exists
+    db_path_obj = Path(db_path)
+    db_path_obj.parent.mkdir(parents=True, exist_ok=True)
+
     db = Database(db_path)
     db.connect()
 

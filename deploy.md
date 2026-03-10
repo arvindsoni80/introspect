@@ -254,7 +254,7 @@ gcloud run deploy introspect \
   --memory 2Gi \
   --cpu 2 \
   --timeout 300 \
-  --set-env-vars GCS_BUCKET_NAME=introspect-data-prod,GCP_PROJECT=introspect-prod \
+  --set-env-vars GCS_BUCKET_NAME=${BUCKET_NAME},GCP_PROJECT=${PROJECT_ID} \
   --service-account introspect-sa@${PROJECT_ID}.iam.gserviceaccount.com
 ```
 
@@ -274,7 +274,7 @@ gcloud run deploy introspect \
   --memory 2Gi \
   --cpu 2 \
   --timeout 300 \
-  --set-env-vars GCS_BUCKET_NAME=introspect-data-prod,GCP_PROJECT=introspect-prod \
+  --set-env-vars GCS_BUCKET_NAME=${BUCKET_NAME},GCP_PROJECT=${PROJECT_ID} \
   --service-account introspect-sa@${PROJECT_ID}.iam.gserviceaccount.com
 ```
 
@@ -300,7 +300,7 @@ You can add authentication later following Step 6.
 
 ## Step 6: Access Control (Security)
 
-By default, the deployment above uses `--allow-unauthenticated`, which makes the app publicly accessible. For production, you should restrict access.
+The deployment commands above default to `--no-allow-unauthenticated` (authentication required), which is the recommended security posture for production. If you used `--allow-unauthenticated` for initial testing, follow the steps below to add access control.
 
 ### Option A: Identity-Aware Proxy (IAP) - Recommended ✅
 
@@ -318,7 +318,7 @@ gcloud run deploy introspect \
   --memory 2Gi \
   --cpu 2 \
   --timeout 300 \
-  --set-env-vars GCS_BUCKET_NAME=introspect-data-prod,GCP_PROJECT=introspect-prod \
+  --set-env-vars GCS_BUCKET_NAME=${BUCKET_NAME},GCP_PROJECT=${PROJECT_ID} \
   --service-account introspect-sa@${PROJECT_ID}.iam.gserviceaccount.com
 ```
 
@@ -699,9 +699,12 @@ jobs:
         credentials_json: ${{ secrets.GCP_CREDENTIALS }}
 
     - name: Deploy to Cloud Run
+      env:
+        PROJECT_ID: introspect-prod
+        REGION: us-central1
       run: |
-        gcloud builds submit --tag us-central1-docker.pkg.dev/introspect-prod/cloud-run-source-deploy/introspect
-        gcloud run deploy introspect --image us-central1-docker.pkg.dev/introspect-prod/cloud-run-source-deploy/introspect --region us-central1
+        gcloud builds submit --tag ${REGION}-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/introspect
+        gcloud run deploy introspect --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/introspect --region ${REGION}
 ```
 
 ## Next Steps
