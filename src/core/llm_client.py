@@ -1,5 +1,7 @@
 """LLM client for Anthropic API calls."""
 
+from __future__ import annotations
+
 from anthropic import Anthropic
 
 

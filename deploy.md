@@ -442,24 +442,55 @@ Then set up a Load Balancer with Cloud Run backend and attach the security polic
 
 **Best for:** Custom authentication requirements or when not using Google Workspace
 
-Add authentication directly in your Streamlit app. Create `streamlit_app/auth.py`:
+Add authentication directly in your Streamlit app.
+
+**Step 1: Install bcrypt**
+```bash
+# Add to requirements.txt
+pip install bcrypt
+```
+
+**Step 2: Generate password hashes**
+```python
+# Run this once to generate hashed passwords
+import bcrypt
+
+password = "your_password_here"
+hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+print(hashed.decode('utf-8'))  # Store this in USERS dict
+```
+
+**Step 3: Create `streamlit_app/auth.py`:**
 
 ```python
-"""Simple authentication for Streamlit app."""
+"""Secure authentication for Streamlit app."""
 import streamlit as st
-import hashlib
+import bcrypt
 
-# Store hashed passwords (in production, use a database or Secret Manager)
+# Store bcrypt hashed passwords (in production, use a database or Secret Manager)
+# Generate hashes using: bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 USERS = {
-    "admin@yourcompany.com": "hashed_password_here",
-    "user@yourcompany.com": "hashed_password_here",
+    "admin@yourcompany.com": "$2b$12$...",  # Replace with actual bcrypt hash
+    "user@yourcompany.com": "$2b$12$...",   # Replace with actual bcrypt hash
 }
 
 ALLOWED_DOMAIN = "yourcompany.com"
 
-def hash_password(password: str) -> str:
-    """Hash password using SHA256."""
-    return hashlib.sha256(password.encode()).hexdigest()
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a password against its bcrypt hash.
+
+    Args:
+        plain_password: Plain text password from user input
+        hashed_password: Bcrypt hash from storage
+
+    Returns:
+        True if password matches, False otherwise
+    """
+    return bcrypt.checkpw(
+        plain_password.encode('utf-8'),
+        hashed_password.encode('utf-8')
+    )
 
 def check_authentication():
     """Check if user is authenticated."""
@@ -481,8 +512,8 @@ def check_authentication():
                     st.error(f"Access restricted to {ALLOWED_DOMAIN} domain")
                     st.stop()
 
-                # Check credentials
-                if email in USERS and USERS[email] == hash_password(password):
+                # Check credentials using secure bcrypt verification
+                if email in USERS and verify_password(password, USERS[email]):
                     st.session_state.authenticated = True
                     st.session_state.user_email = email
                     st.success("Login successful!")
@@ -560,12 +591,48 @@ gcloud run services update introspect --region $REGION
 1. **Database Security**
    - Database is not publicly accessible from the internet
    - Only accessible via Cloud Run service account
-   - Consider encrypting database file before upload for sensitive data:
-     ```bash
-     # Example: Encrypt before upload
-     openssl enc -aes-256-cbc -salt -in introspect.db -out introspect.db.enc
-     gsutil cp introspect.db.enc gs://$BUCKET_NAME/introspect.db
-     ```
+
+   **Optional: Database Encryption at Rest**
+
+   For highly sensitive data, you can encrypt the database before uploading. This requires modifying `startup.py` to decrypt on startup.
+
+   **If using encryption:**
+   ```bash
+   # Step 1: Encrypt database locally (you'll be prompted for password)
+   openssl enc -aes-256-cbc -salt -in introspect.db -out introspect.db.enc
+
+   # Step 2: Upload encrypted file to Cloud Storage
+   gsutil cp introspect.db.enc gs://${BUCKET_NAME}/introspect.db.enc
+
+   # Step 3: Store encryption password in Secret Manager
+   echo -n "your-encryption-password" | gcloud secrets create db-encryption-password --data-file=-
+   ```
+
+   **Then modify `startup.py`** to download the `.enc` file and decrypt it:
+   ```python
+   # In download_database() function, change:
+   source_blob_name = 'introspect.db.enc'  # Download .enc file
+   encrypted_path = 'introspect.db.enc'
+   destination_path = 'data/introspect.db'
+
+   # Download encrypted file
+   blob.download_to_filename(encrypted_path)
+
+   # Decrypt using password from Secret Manager
+   import subprocess
+   db_password = os.environ.get('DB_ENCRYPTION_PASSWORD')  # Loaded from Secret Manager
+   subprocess.run([
+       'openssl', 'enc', '-d', '-aes-256-cbc',
+       '-in', encrypted_path,
+       '-out', destination_path,
+       '-pass', f'pass:{db_password}'
+   ], check=True)
+
+   # Cleanup
+   os.remove(encrypted_path)
+   ```
+
+   **Note:** Cloud Storage already encrypts data at rest by default. Database-level encryption is only needed for specific compliance requirements.
 
 2. **Secrets Rotation**
    - Regularly rotate API keys and tokens (recommended: every 90 days)

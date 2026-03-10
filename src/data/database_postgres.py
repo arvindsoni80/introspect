@@ -1,5 +1,6 @@
 """Database connection supporting both SQLite and PostgreSQL."""
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional, Union
@@ -42,8 +43,11 @@ class Database:
     def connect(self):
         """Open database connection."""
         if self.db_type == 'postgresql':
-            self.conn = psycopg2.connect(self.connection_string)
-            # Return rows as dicts
+            self.conn = psycopg2.connect(
+                self.connection_string,
+                cursor_factory=psycopg2.extras.RealDictCursor
+            )
+            # Register JSONB handlers
             psycopg2.extras.register_default_jsonb(self.conn)
         else:
             self.conn = sqlite3.connect(self.connection_string)
@@ -74,11 +78,37 @@ class Database:
             schema_sql = f.read()
 
         if self.db_type == 'postgresql':
-            # PostgreSQL: convert SQLite-specific syntax
-            schema_sql = schema_sql.replace(
-                "AUTOINCREMENT", "SERIAL"
-            ).replace(
-                "datetime('now')", "CURRENT_TIMESTAMP"
+            # PostgreSQL: convert SQLite-specific syntax using regex
+
+            # Fix 1: INTEGER PRIMARY KEY AUTOINCREMENT → SERIAL PRIMARY KEY
+            # Pattern: column_name INTEGER PRIMARY KEY AUTOINCREMENT
+            # Replace: column_name SERIAL PRIMARY KEY
+            schema_sql = re.sub(
+                r'(\w+)\s+INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT',
+                r'\1 SERIAL PRIMARY KEY',
+                schema_sql,
+                flags=re.IGNORECASE
+            )
+
+            # Fix 2: datetime('now') → CURRENT_TIMESTAMP
+            schema_sql = schema_sql.replace("datetime('now')", "CURRENT_TIMESTAMP")
+
+            # Fix 3: CHECK (column IN (..., NULL)) → CHECK (column IS NULL OR column IN (...))
+            # Pattern: CHECK (column_name IN ('val1', 'val2', ..., NULL))
+            # Replace: CHECK (column_name IS NULL OR column_name IN ('val1', 'val2', ...))
+            def fix_null_in_check(match):
+                column = match.group(1)
+                values = match.group(2)
+                # Remove NULL from the values list
+                values_clean = re.sub(r',\s*NULL\s*\)', ')', values)
+                values_clean = re.sub(r'\(\s*NULL\s*,', '(', values_clean)
+                return f"CHECK ({column} IS NULL OR {column} IN {values_clean})"
+
+            schema_sql = re.sub(
+                r'CHECK\s*\((\w+)\s+IN\s*(\([^)]*,\s*NULL[^)]*\))\)',
+                fix_null_in_check,
+                schema_sql,
+                flags=re.IGNORECASE
             )
 
             # Execute statements individually (PostgreSQL doesn't support executescript)

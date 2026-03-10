@@ -69,7 +69,8 @@ def create_postgres_schema(sqlite_path, postgres_conn):
     print("\n🏗️  Creating PostgreSQL schema...")
 
     # Read schema from schema.sql (already PostgreSQL compatible)
-    schema_path = Path(__file__).parent / "src" / "data" / "schema.sql"
+    # Go up from scripts/ directory to repository root, then to src/data/schema.sql
+    schema_path = Path(__file__).resolve().parent.parent / "src" / "data" / "schema.sql"
 
     if not schema_path.exists():
         print(f"  ⚠️  schema.sql not found, using SQLite schema")

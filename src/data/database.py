@@ -66,12 +66,15 @@ class Database:
         tables = [row['name'] for row in cursor.fetchall()]
 
         for table in tables:
-            self.conn.execute(f"DROP TABLE IF EXISTS {table}")
+            # Sanitize table name by escaping quotes and wrapping in double quotes
+            safe_name = '"' + table.replace('"', '""') + '"'
+            sql = f"DROP TABLE IF EXISTS {safe_name}"
+            self.conn.execute(sql)
             print(f"✓ Dropped table: {table}")
 
         self.conn.commit()
 
-        print(f"✓ All tables dropped")
+        print("✓ All tables dropped")
 
     def reset_database(self):
         """Drop all tables and recreate schema."""
@@ -92,7 +95,9 @@ class Database:
         counts = {}
 
         for table in tables:
-            cursor = self.conn.execute(f"SELECT COUNT(*) as count FROM {table}")
+            # Sanitize table name by escaping quotes and wrapping in double quotes
+            safe_name = '"' + table.replace('"', '""') + '"'
+            cursor = self.conn.execute(f"SELECT COUNT(*) as count FROM {safe_name}")
             counts[table] = cursor.fetchone()['count']
 
         return counts

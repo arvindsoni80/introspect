@@ -608,13 +608,16 @@ class Repository:
     # Call Participants
     # =========================================================================
 
-    def store_call_participants(self, call_id: str, participants: List[Dict]) -> None:
+    def store_call_participants(self, call_id: str, participants: List[Dict]) -> int:
         """
         Store participants for a call.
 
         Args:
             call_id: Call ID
             participants: List of participant dicts from Gong API parties data
+
+        Returns:
+            Number of participants inserted (only those with speaker_id)
         """
         # Delete existing participants for this call (in case of re-processing)
         self.conn.execute("DELETE FROM call_participants WHERE call_id = ?", (call_id,))

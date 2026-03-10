@@ -1,6 +1,6 @@
 """Call processor orchestrates the entire evaluation flow."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 from ..core.llm_client import LLMClient
@@ -80,7 +80,7 @@ class CallProcessor:
         try:
             call_date = datetime.fromisoformat(started.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
-            call_date = datetime.now()
+            call_date = datetime.now(timezone.utc)
             print(f"  ⚠️  Could not parse date, using current time")
 
         parties = call_data.get("parties", [])

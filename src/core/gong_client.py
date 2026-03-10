@@ -254,21 +254,12 @@ class AsyncGongClient:
         calls = data.get("calls", [])
         speaker_roles = {}
 
-        import sys
-        print(f"\n🔍 DEBUG: Fetched {len(calls)} calls from Gong API", file=sys.stderr, flush=True)
-
         for call in calls:
             call_id = call.get("id")
             if not call_id:
                 continue
 
             parties = call.get("parties", [])
-            print(f"\n🔍 DEBUG: Call {call_id} has {len(parties)} parties", file=sys.stderr, flush=True)
-
-            # Debug: print first party structure
-            if parties:
-                print(f"🔍 DEBUG: First party fields: {list(parties[0].keys())}", file=sys.stderr, flush=True)
-                print(f"🔍 DEBUG: First party sample: {parties[0]}", file=sys.stderr, flush=True)
 
             call_speakers = {}
 
